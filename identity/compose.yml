@@ -1,0 +1,19 @@
+services:
+  api-identity:
+    image: mferrerovilas/api-identity:latest
+    container_name: api-identity
+
+    ports:
+      - "8092:8082"
+
+    env_file:
+      - .env
+
+    restart: unless-stopped
+
+    networks:
+      - m-internal-services
+
+networks:
+  m-internal-services:
+    external: true

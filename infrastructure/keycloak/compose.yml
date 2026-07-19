@@ -1,0 +1,34 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    container_name: keycloak
+
+    env_file:
+      - .env
+
+    command:
+      - start
+      - --proxy-headers=xforwarded
+
+    volumes:
+      - keycloak-themes:/opt/keycloak/providers
+
+    ports:
+      - "8080:8080"
+
+    restart: unless-stopped
+
+    networks:
+      - m-external-services
+      - m-internal-services
+
+volumes:
+  keycloak-themes:
+    external: true
+
+networks:
+  m-external-services:
+    external: true
+
+  m-internal-services:
+    external: true

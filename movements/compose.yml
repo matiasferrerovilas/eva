@@ -1,0 +1,35 @@
+services:
+  api-movements:
+    image: mferrerovilas/api-movements:latest
+    container_name: api-movements
+
+    ports:
+      - "8090:8081"
+
+    env_file:
+      - .env
+
+    restart: unless-stopped
+
+    networks:
+      - m-external-services
+      - m-internal-services
+
+  fe-movements:
+    image: mferrerovilas/fe-movements:latest
+    container_name: fe-movements
+
+    expose:
+      - "80"
+
+    restart: unless-stopped
+
+    networks:
+      - m-external-services
+
+networks:
+  m-external-services:
+    external: true
+
+  m-internal-services:
+    external: true

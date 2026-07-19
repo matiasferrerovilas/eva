@@ -1,0 +1,25 @@
+services:
+  adguardhome:
+    container_name: adguardhome
+    image: adguard/adguardhome
+    restart: unless-stopped
+    ports:
+      - 53:53/tcp # plain dns over tcp
+      - 53:53/udp # plain dns over udp
+      - 82:80/tcp # http web interface
+      - 3001:3000/tcp # initial setup web interface
+    volumes:
+      - config:/opt/adguardhome/conf
+      - work:/opt/adguardhome/work
+    networks:
+      - m-external-services
+
+volumes:
+  config:
+    driver: local
+  work:
+    driver: local
+
+networks:
+  m-external-services:
+    external: true

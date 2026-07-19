@@ -1,0 +1,16 @@
+services:
+  oauth2proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:latest
+    container_name: oauth2proxy
+
+    env_file:
+      - .env
+
+    restart: unless-stopped
+
+    networks:
+      - m-external-services
+
+networks:
+  m-external-services:
+    external: true

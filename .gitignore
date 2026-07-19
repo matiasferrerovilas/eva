@@ -1,0 +1,23 @@
+# Secrets
+**/.env
+
+# Persistent data
+**/data/
+**/letsencrypt/
+**/uploads/
+**/cache/
+**/logs/
+**/tmp/
+
+# Docker volumes mounted locally
+**/mysql_data/
+**/postgres_data/
+**/redis_data/
+**/rabbitmq_data/
+
+# Immich
+immich/model-cache/
+
+# OS
+.DS_Store
+Thumbs.db
