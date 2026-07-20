@@ -19,6 +19,8 @@ services:
 
 volumes:
   mysql_data:
+    external: true
+    name: mysql_mysql_data
 
 networks:
   m-internal-services:
