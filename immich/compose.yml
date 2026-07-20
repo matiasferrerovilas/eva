@@ -50,7 +50,7 @@ services:
     image: docker.io/valkey/valkey:9@sha256:4963247afc4cd33c7d3b2d2816b9f7f8eeebab148d29056c2ca4d7cbc966f2d9
 
     healthcheck:
-      test: redis-cli ping || exit 1
+      test: ["CMD", "redis-cli", "ping"]
 
     restart: always
 
@@ -66,6 +66,12 @@ services:
 
     env_file:
       - .env
+
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_DB: ${DB_DATABASE_NAME}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
 
     volumes:
       - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
