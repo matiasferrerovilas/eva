@@ -3,6 +3,7 @@
 set -euo pipefail
 
 ROOT="/opt/homelab"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 # Colors
 RED='\033[0;31m'
@@ -28,11 +29,24 @@ error() {
 }
 
 find_compose() {
-    find "$ROOT" -type f -name "compose.yml" | sort
+    find "$ROOT" \
+        \( \
+            -name ".git" -o \
+            -name "data" -o \
+            -name "letsencrypt" -o \
+            -name "uploads" -o \
+            -name "upload" -o \
+            -name "database" -o \
+            -name "model-cache" -o \
+            -name "cache" -o \
+            -name "logs" -o \
+            -name "tmp" \
+        \) -prune \
+        -o -type f -name "compose.yml" -print | sort
 }
 
 find_service() {
-    find "$ROOT" -type f -path "*/$1/compose.yml"
+    find_compose | grep "/$1/compose.yml$" || true
 }
 
 run_all() {
@@ -56,8 +70,8 @@ run_all() {
 run_one() {
     local service="$1"
     local cmd="$2"
-    local compose
 
+    local compose
     compose=$(find_service "$service")
 
     if [[ -z "$compose" ]]; then
@@ -78,7 +92,6 @@ logs() {
     shift
 
     local compose
-
     compose=$(find_service "$service")
 
     if [[ -z "$compose" ]]; then
@@ -86,34 +99,109 @@ logs() {
         exit 1
     fi
 
-    cd "$(dirname "$compose")"
+    (
+        cd "$(dirname "$compose")"
+        docker compose logs "$@"
+    )
+}
 
-    docker compose logs "$@"
+image_ids_for() {
+    # Requiere estar parado en la carpeta del compose. Imprime "imagen<TAB>id" por línea.
+    local img
+    while IFS= read -r img; do
+        [[ -z "$img" ]] && continue
+        local id
+        id=$(docker image inspect "$img" --format '{{.Id}}' 2>/dev/null || echo "missing")
+        printf '%s\t%s\n' "$img" "$id"
+    done < <(docker compose config --images 2>/dev/null)
+}
+
+smart_update_dir() {
+    local dir="$1"
+    local name
+    name=$(basename "$dir")
+
+    (
+        cd "$dir"
+
+        local before after
+        before=$(image_ids_for)
+
+        docker compose pull --quiet 2>/dev/null || docker compose pull >/dev/null
+
+        after=$(image_ids_for)
+
+        if [[ "$before" == "$after" ]]; then
+            info "$name sin cambios"
+        else
+            docker compose up -d
+            success "$name actualizado (imagen nueva)"
+        fi
+    )
+}
+
+smart_update_all() {
+    while IFS= read -r compose; do
+        smart_update_dir "$(dirname "$compose")"
+    done < <(find_compose)
+}
+
+smart_update_one() {
+    local service="$1"
+
+    local compose
+    compose=$(find_service "$service")
+
+    if [[ -z "$compose" ]]; then
+        error "Servicio '$service' no encontrado."
+        exit 1
+    fi
+
+    smart_update_dir "$(dirname "$compose")"
+}
+
+status() {
+    local py="$SCRIPT_DIR/homelab.py"
+
+    if [[ ! -f "$py" ]]; then
+        error "No se encontró $py"
+        exit 1
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        error "python3 no está instalado."
+        exit 1
+    fi
+
+    python3 "$py"
 }
 
 usage() {
-    cat <<EOF
+local self
+self="$(basename "${BASH_SOURCE[0]}")"
+cat <<EOF
 
 Homelab CLI
 
 Uso:
 
-  homelab.sh up [servicio]
-  homelab.sh down [servicio]
-  homelab.sh restart [servicio]
-  homelab.sh pull [servicio]
-  homelab.sh update [servicio]
-  homelab.sh status
-  homelab.sh logs <servicio> [-f]
+  $self up [servicio]
+  $self down [servicio]
+  $self restart [servicio]
+  $self pull [servicio]
+  $self update [servicio]
+  $self status
+  $self logs <servicio> [-f]
 
 Ejemplos:
 
-  ./homelab.sh up
-  ./homelab.sh up identity
-  ./homelab.sh update
-  ./homelab.sh update movements
-  ./homelab.sh logs identity
-  ./homelab.sh logs identity -f
+  $self up
+  $self up identity
+  $self update
+  $self update movements
+  $self status
+  $self logs identity
+  $self logs identity -f
 
 EOF
 }
@@ -121,57 +209,31 @@ EOF
 case "${1:-}" in
 
 up)
-    if [[ $# -eq 2 ]]; then
-        run_one "$2" "up -d"
-    else
-        run_all "up -d"
-    fi
+    [[ $# -eq 2 ]] && run_one "$2" "up -d" || run_all "up -d"
     ;;
 
 down)
-    if [[ $# -eq 2 ]]; then
-        run_one "$2" "down"
-    else
-        run_all "down"
-    fi
+    [[ $# -eq 2 ]] && run_one "$2" "down" || run_all "down"
     ;;
 
 restart)
-    if [[ $# -eq 2 ]]; then
-        run_one "$2" "restart"
-    else
-        run_all "restart"
-    fi
+    [[ $# -eq 2 ]] && run_one "$2" "restart" || run_all "restart"
     ;;
 
 pull)
-    if [[ $# -eq 2 ]]; then
-        run_one "$2" "pull"
-    else
-        run_all "pull"
-    fi
+    [[ $# -eq 2 ]] && run_one "$2" "pull" || run_all "pull"
     ;;
 
 update)
-    if [[ $# -eq 2 ]]; then
-        run_one "$2" "pull"
-        run_one "$2" "up -d"
-    else
-        run_all "pull"
-        run_all "up -d"
-    fi
+    [[ $# -eq 2 ]] && smart_update_one "$2" || smart_update_all
     ;;
 
 status)
-    run_all "ps"
+    status
     ;;
 
 logs)
-    if [[ $# -lt 2 ]]; then
-        usage
-        exit 1
-    fi
-
+    [[ $# -lt 2 ]] && { usage; exit 1; }
     shift
     logs "$@"
     ;;
@@ -184,4 +246,5 @@ logs)
     usage
     exit 1
     ;;
+
 esac

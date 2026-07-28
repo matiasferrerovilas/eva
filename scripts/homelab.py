@@ -34,6 +34,7 @@ def term_width():
 def find_stacks():
     return sorted(ROOT.rglob("compose.yml"))
 
+
 def compose_ps(compose_file: Path):
     try:
         result = subprocess.run(
@@ -77,6 +78,7 @@ def compose_ps(compose_file: Path):
 
     except subprocess.CalledProcessError:
         return []
+
 
 def analyse_stack(compose):
     containers = compose_ps(compose)
@@ -132,20 +134,34 @@ def analyse_stack(compose):
 def render(rows):
 
     tw = min(term_width(), 90)
-
     sep = c(DIM) + "─" * tw + RESET
 
     print()
-
     print(c(BOLD, WHITE) + "🏠 Homelab Status" + RESET)
     print(sep)
 
-    print(
-        f"{'STACK':<20}"
-        f"{'STATUS':<15}"
-        f"{'CONTAINERS'}"
-    )
+    if not rows:
+        print(c(DIM) + "No se encontraron stacks (compose.yml) bajo " + str(ROOT) + RESET)
+        print()
+        return
 
+    # Column widths are computed from plain text only — the icon is a
+    # separate, fixed-width prefix, never inlined into a padded string.
+    # (Emojis count as 1 char in Python but render ~2 terminal cells,
+    # so mixing them into f"{...:<N}" silently breaks column alignment.)
+    name_w = max(len("STACK"), *(len(r["name"]) for r in rows))
+    status_w = max(len("STATUS"), *(len(r["status"]) for r in rows))
+    containers_w = max(len("CONTAINERS"), *(len(f"{r['running']}/{r['total']}") for r in rows))
+
+    header = (
+        "   "
+        + c(BOLD) + "STACK".ljust(name_w) + RESET
+        + "  "
+        + c(BOLD) + "STATUS".ljust(status_w) + RESET
+        + "  "
+        + c(BOLD) + "CONTAINERS".rjust(containers_w) + RESET
+    )
+    print(header)
     print(sep)
 
     total_stacks = len(rows)
@@ -157,20 +173,26 @@ def render(rows):
         total_running += row["running"]
         total_containers += row["total"]
 
-        status = f"{row['icon']} {row['status']}"
+        name = row["name"].ljust(name_w)
+        status_plain = row["status"].ljust(status_w)
+        status_colored = c(row["color"]) + status_plain + RESET
+        containers = f"{row['running']}/{row['total']}".rjust(containers_w)
 
-        print(
-            f"{row['name']:<20}"
-            f"{status:<15}"
-            f"{row['running']}/{row['total']}"
-        )
+        print(f"{row['icon']} {name}  {status_colored}  {containers}")
 
     print(sep)
 
-    print(f"Stacks      : {total_stacks}")
-    print(f"Containers  : {total_containers}")
-    print(f"Running     : {total_running}")
+    if total_containers == 0:
+        summary_color = DIM
+    elif total_running == total_containers:
+        summary_color = GREEN
+    elif total_running == 0:
+        summary_color = RED
+    else:
+        summary_color = YELLOW
 
+    summary = f"Stacks {total_stacks} · Containers {total_containers} · Running {total_running}"
+    print(c(BOLD, summary_color) + summary + RESET)
     print()
 
 
