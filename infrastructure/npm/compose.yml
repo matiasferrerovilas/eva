@@ -12,8 +12,11 @@ services:
       - ./letsencrypt:/etc/letsencrypt
     networks:
       - m-external-services
+      - m-internal-services
       
 networks:
   m-external-services:
+    external: true
+  m-internal-services:
     external: true
       

@@ -1,0 +1,38 @@
+services:
+  api-keep:
+    image: mferrerovilas/api-keep:latest
+    container_name: api-keep
+
+    ports:
+      - "8093:8081"
+
+    env_file:
+      - .env
+
+    restart: unless-stopped
+
+    volumes:
+      - /mnt/sda1/keep-files:/mnt/sda1/keep-files
+
+    networks:
+      - m-external-services
+      - m-internal-services
+
+  fe-keep:
+    image: mferrerovilas/fe-keep:latest
+    container_name: fe-keep
+
+    expose:
+      - "80"
+
+    restart: unless-stopped
+
+    networks:
+      - m-external-services
+
+networks:
+  m-external-services:
+    external: true
+
+  m-internal-services:
+    external: true

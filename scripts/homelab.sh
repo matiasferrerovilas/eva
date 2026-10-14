@@ -50,26 +50,34 @@ find_service() {
 }
 
 run_all() {
-    local cmd="$1"
+    local -a cmd=("$@")
+    local -a failed=()
 
     while IFS= read -r compose; do
-        local dir
+        local dir name
         dir=$(dirname "$compose")
+        name=$(basename "$dir")
 
-        info "$(basename "$dir")"
+        info "$name"
 
-        (
-            cd "$dir"
-            docker compose $cmd
-        )
+        if ! (cd "$dir" && docker compose "${cmd[@]}"); then
+            error "$name falló"
+            failed+=("$name")
+        fi
 
         echo
     done < <(find_compose)
+
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        warning "Stacks con errores: ${failed[*]}"
+        return 1
+    fi
 }
 
 run_one() {
     local service="$1"
-    local cmd="$2"
+    shift
+    local -a cmd=("$@")
 
     local compose
     compose=$(find_service "$service")
@@ -81,10 +89,7 @@ run_one() {
 
     info "$service"
 
-    (
-        cd "$(dirname "$compose")"
-        docker compose $cmd
-    )
+    (cd "$(dirname "$compose")" && docker compose "${cmd[@]}")
 }
 
 logs() {
@@ -141,9 +146,22 @@ smart_update_dir() {
 }
 
 smart_update_all() {
+    local -a failed=()
+
     while IFS= read -r compose; do
-        smart_update_dir "$(dirname "$compose")"
+        local dir
+        dir=$(dirname "$compose")
+
+        if ! smart_update_dir "$dir"; then
+            error "$(basename "$dir") falló"
+            failed+=("$(basename "$dir")")
+        fi
     done < <(find_compose)
+
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        warning "Stacks con errores: ${failed[*]}"
+        return 1
+    fi
 }
 
 smart_update_one() {
@@ -158,6 +176,11 @@ smart_update_one() {
     fi
 
     smart_update_dir "$(dirname "$compose")"
+}
+
+docker_prune() {
+    echo "🐳 Cleaning Docker..."
+    docker system prune -a --volumes -f
 }
 
 status() {
@@ -192,6 +215,7 @@ Uso:
   $self update [servicio]
   $self status
   $self logs <servicio> [-f]
+  $self prune
 
 Ejemplos:
 
@@ -202,6 +226,7 @@ Ejemplos:
   $self status
   $self logs identity
   $self logs identity -f
+  $self prune
 
 EOF
 }
@@ -209,27 +234,38 @@ EOF
 case "${1:-}" in
 
 up)
-    [[ $# -eq 2 ]] && run_one "$2" "up -d" || run_all "up -d"
+    if [[ $# -eq 2 ]]; then run_one "$2" up -d; else run_all up -d; fi
     ;;
 
 down)
-    [[ $# -eq 2 ]] && run_one "$2" "down" || run_all "down"
+    if [[ $# -eq 2 ]]; then run_one "$2" down; else run_all down; fi
     ;;
 
 restart)
-    [[ $# -eq 2 ]] && run_one "$2" "restart" || run_all "restart"
+    if [[ $# -eq 2 ]]; then run_one "$2" restart; else run_all restart; fi
     ;;
 
 pull)
-    [[ $# -eq 2 ]] && run_one "$2" "pull" || run_all "pull"
+    if [[ $# -eq 2 ]]; then run_one "$2" pull; else run_all pull; fi
     ;;
 
 update)
-    [[ $# -eq 2 ]] && smart_update_one "$2" || smart_update_all
+    rc=0
+    if [[ $# -eq 2 ]]; then
+        smart_update_one "$2" || rc=$?
+    else
+        smart_update_all || rc=$?
+    fi
+    docker_prune
+    exit "$rc"
     ;;
 
 status)
     status
+    ;;
+
+prune)
+    docker_prune
     ;;
 
 logs)
