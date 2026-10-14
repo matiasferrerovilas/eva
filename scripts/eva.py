@@ -12,7 +12,11 @@ import time
 import tty
 from pathlib import Path
 
-ROOT = Path("/opt/homelab")
+BASE = Path(__file__).resolve().parent.parent  # clone root: <BASE>/scripts/eva.py
+CONFIG_DIR = BASE / "config"
+ENV_FILE = CONFIG_DIR / ".env"
+ENV_KEY = "containers_location"
+ROOT = None  # set by load_config()
 PRUNE_DIRS = {
     ".git", "data", "letsencrypt", "uploads", "upload", "database",
     "model-cache", "cache", "logs", "tmp",
@@ -41,6 +45,68 @@ def banner(title, subtitle=""):
     print(f"{CYAN}╭{'─' * (w - 2)}╮{R}")
     print(f"{CYAN}│{R} {B}{WHITE}{title}{R}{' ' * max(0, w - 3 - len(title) - len(subtitle))}{D}{subtitle}{R} {CYAN}│{R}")
     print(f"{CYAN}╰{'─' * (w - 2)}╯{R}")
+
+
+def clear():
+    if sys.stdout.isatty():
+        print("\033[2J\033[3J\033[H", end="", flush=True)
+
+
+# ── config ───────────────────────────────────────────────────
+def read_env():
+    env = {}
+    if ENV_FILE.exists():
+        for ln in ENV_FILE.read_text().splitlines():
+            ln = ln.strip()
+            if ln and not ln.startswith("#") and "=" in ln:
+                k, v = ln.split("=", 1)
+                env[k.strip()] = v.strip().strip("\"'")
+    return env
+
+
+def write_env(key, value):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    lines = ENV_FILE.read_text().splitlines() if ENV_FILE.exists() else []
+    lines = [ln for ln in lines if not ln.strip().startswith(f"{key}=")]
+    ENV_FILE.write_text("\n".join(lines + [f"{key}={value}"]) + "\n")
+
+
+def load_config():
+    global ROOT
+    value = read_env().get(ENV_KEY)
+    if value and Path(value).expanduser().is_dir():
+        ROOT = Path(value).expanduser()
+        return True
+    return False
+
+
+def cmd_install():
+    global ROOT
+    banner("🛠️  Configuración", "eva")
+    current = read_env().get(ENV_KEY) or str(BASE / "services")
+    info(f"Config: {ENV_FILE}")
+    try:
+        raw = input(f"\n{CYAN}❯{R} Ruta donde están tus contenedores (compose.yml) [{current}]: ").strip()
+        path = Path(raw or current).expanduser().resolve()
+        if not path.is_dir():
+            if input(f"{path} no existe. ¿Crearla? [y/N]: ").strip().lower() != "y":
+                warn("Configuración cancelada")
+                return False
+            path.mkdir(parents=True)
+        write_env(ENV_KEY, str(path))
+        ROOT = path
+        ok(f"{ENV_KEY}={path}")
+        ok(f"{len(find_stacks())} stack(s) encontrados")
+        me = Path(__file__).resolve()
+        target = Path("/usr/local/bin/eva")
+        if not (target.is_symlink() and target.resolve() == me):
+            if input(f"\n¿Instalar el comando 'eva' en {target}? (sudo) [Y/n]: ").strip().lower() != "n":
+                r = subprocess.run(["sudo", "ln", "-sf", str(me), str(target)])
+                ok("Comando 'eva' instalado") if r.returncode == 0 else err("No se pudo crear el symlink")
+        return True
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
 
 
 def ok(msg): print(f"{GREEN}✔{R} {msg}")
@@ -150,15 +216,36 @@ def pick(title, items, extra=None):
             elif key == "down":
                 cur = (cur + 1) % len(entries)
             elif key == "enter":
+                clear()
                 return entries[cur][0]
             elif key == "esc":
+                clear()
                 return None
             print(f"\033[{len(entries)}A", end="")
     except KeyboardInterrupt:
+        clear()
         return None
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         print("\033[?25h", end="")
+
+
+def wait_key(timeout=None):
+    """Block until Enter/Space/Esc/q (cbreak). Returns True if a key was pressed,
+    False on timeout or non-TTY. Used for 'back to menu' pauses and watch mode."""
+    if not sys.stdin.isatty():
+        return False
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    try:
+        if not select.select([fd], [], [], timeout)[0]:
+            return False
+        return read_key() in ("enter", "esc")
+    except KeyboardInterrupt:
+        return True
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
 def pick_numbered(title, items, extra=None):
@@ -217,10 +304,12 @@ def cmd_ps(show_all=False, watch=False, interval=3):
         while True:
             print("\033[2J\033[H", end="")
             render_ps(show_all, f" · ↻ {interval}s")
-            print(f"{D}Ctrl+C para salir{R}", flush=True)
-            time.sleep(interval)
+            print(f"{D}Esc para volver{R}", flush=True)
+            if wait_key(interval):
+                break
     except KeyboardInterrupt:
-        print()
+        pass
+    clear()
 
 
 def cmd_system(action=None):
@@ -228,16 +317,20 @@ def cmd_system(action=None):
         "update": ("apt update + upgrade", "sudo apt update && sudo apt upgrade -y"),
         "upgrade": ("apt full-upgrade", "sudo apt full-upgrade -y"),
         "clean": ("autoremove + autoclean", "sudo apt autoremove -y && sudo apt autoclean"),
+        "docker": ("Limpiar Docker", None),
     }
     if action is None:
         keys = list(cmds)
-        sel = pick("🖥️  Sistema (apt)", [f"{k}  {D}{cmds[k][0]}{R}" for k in keys])
+        sel = pick("🖥️  Sistema", [
+            cmds[k][0] if k == "docker" else f"{k}  {D}{cmds[k][0]}{R}" for k in keys])
         if sel is None:
             return
         action = keys[sel]
     if action not in cmds:
         err(f"Acción '{action}' inválida: {', '.join(cmds)}")
         return
+    if action == "docker":
+        return docker_prune()
     print(f"\n{B}{cmds[action][0]}{R}")
     try:
         subprocess.run(cmds[action][1], shell=True)
@@ -375,13 +468,14 @@ MENU = [
     ("3", "Ver logs", cmd_logs),
     ("4", "Update (pull + recrear + prune)", cmd_update),
     ("5", "Up / Down / Restart", None),
-    ("6", "Docker prune", docker_prune),
-    ("7", "Sistema (apt update / upgrade / clean)", cmd_system),
+    ("6", "Sistema (apt, limpiar Docker)", cmd_system),
+    ("7", "Configuración (ruta de contenedores)", cmd_install),
 ]
 
 
 def menu():
     while True:
+        clear()
         banner("🏠 EVA", "homelab")
         sel = pick("¿Qué querés hacer?", [label for _, label, _ in MENU])
         if sel is None:
@@ -396,16 +490,19 @@ def menu():
         else:
             fn()
         if key != "3":
-            ask("Enter para volver al menú")
+            print(f"\n{D}Esc / Enter para volver al menú{R}", flush=True)
+            while not wait_key() and sys.stdin.isatty():
+                pass
 
 
 USAGE = """eva — homelab CLI
 
   eva                       menú interactivo
+  eva install               configurar la ruta de contenedores (config/.env)
   eva containers [-a] [-w] [-i N]
                             contenedores (redes, puertos). -a todos, -w watch
   eva stacks                listar stacks
-  eva system update|upgrade|clean
+  eva system update|upgrade|clean|docker
                             apt update+upgrade / full-upgrade / autoremove
   eva logs [contenedor]     seguir logs
   eva update [stack|all]    pull + recrear + prune
@@ -415,6 +512,16 @@ USAGE = """eva — homelab CLI
 
 
 def main(argv):
+    if argv and argv[0] in ("-h", "--help", "help"):
+        print(USAGE)
+        return 0
+    if argv and argv[0] == "install":
+        return 0 if cmd_install() else 1
+    if not load_config():
+        warn(f"eva no está configurado (falta {ENV_KEY} en {ENV_FILE})")
+        if not cmd_install():
+            return 1
+        input(f"\n{D}Enter para continuar...{R}")
     if not argv:
         return menu()
     c, rest = argv[0], argv[1:]
