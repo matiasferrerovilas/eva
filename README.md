@@ -17,15 +17,14 @@ Built on a Raspberry Pi 5, but it works on any Linux host with Docker.
  ● 19/19 contenedores running
 
 ¿Qué querés hacer?  ↑↓ mover · Enter/Espacio elegir · q volver
- ❯ Listar contenedores
-   Listar stacks
-   Ver logs
+ ❯ Contenedores
    Update (ver novedades, pull, recrear, prune)
-   Up / Down / Restart
    Sistema (apt, limpiar Docker)
-   Configuración (ruta de contenedores)
+   Configuración (idioma, ruta de contenedores)
    Salir
 ```
+
+The **Containers** entry opens a submenu: list containers, list stacks, view logs, up/restart/down of a single container, and up/restart/down of a whole stack.
 
 > The interface is available in **Spanish** and **English**. You pick one during setup (shown above in Spanish).
 
@@ -35,7 +34,7 @@ Built on a Raspberry Pi 5, but it works on any Linux host with Docker.
 - **Containers and stacks**: list them with state, networks, and published ports. Watch mode included.
 - **Logs**: pick a container from a list and follow its logs live.
 - **Update with preview**: compares local image digests against the registry (no download) and shows which stacks have a new version. Then pull, recreate, and prune.
-- **Up / down / restart** for one stack or all of them.
+- **Up / down / restart** for a single container, or for one stack or all of them.
 - **System**: `apt update/upgrade`, `full-upgrade`, `autoremove`, and Docker cleanup.
 - **Arrow-key navigation** everywhere. `Esc` goes back, and the screen is cleared on every step.
 - **Shell completion** for zsh (or bash if zsh is not installed), including stack and container names.
@@ -121,7 +120,8 @@ Run `eva` for the menu, or use commands directly:
 | `eva logs [container]` | Follow logs |
 | `eva check [stack\|all]` | Show which stacks have newer images (downloads nothing) |
 | `eva update [stack\|all] [--force]` | Update stacks that have news, then prune. `--force` updates all selected |
-| `eva up\|down\|restart [stack\|all]` | Compose actions |
+| `eva up\|down\|restart [stack\|all]` | Compose actions on a whole stack. `down` removes the stack's containers (volumes are kept) |
+| `eva container up\|restart\|down [name]` | One container: `docker start` / `restart` / `stop` |
 | `eva system update\|upgrade\|clean\|docker` | apt update+upgrade, full-upgrade, autoremove, Docker cleanup |
 | `eva doctor` | Check requirements (Python, Docker, Compose, Buildx) and config |
 | `eva install` | Configure or reconfigure (language, folder, exclusions, completion) |

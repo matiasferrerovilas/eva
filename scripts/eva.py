@@ -152,7 +152,14 @@ STR = {
     "menu.stacks": ("Listar stacks", "List stacks"),
     "menu.logs": ("Ver logs", "View logs"),
     "menu.update": ("Update (ver novedades, pull, recrear, prune)", "Update (check news, pull, recreate, prune)"),
-    "menu.compose": ("Up / Down / Restart", "Up / Down / Restart"),
+    "menu.containers": ("Contenedores", "Containers"),
+    "menu.ctaction": ("Up / Restart / Down de un contenedor", "Up / Restart / Down of a container"),
+    "menu.stackaction": ("Up / Restart / Down de un stack", "Up / Restart / Down of a stack"),
+    "ct.action": ("⚙️  Acción sobre el contenedor", "⚙️  Container action"),
+    "ct.pick": ("{action}: ¿qué contenedor?", "{action}: which container?"),
+    "ct.notfound": ("Contenedor '{name}' no encontrado", "Container '{name}' not found"),
+    "ct.ok": ("{name}: {action} OK", "{name}: {action} OK"),
+    "d.container": ("Up, restart o down de un contenedor", "Up, restart or down a container"),
     "menu.system": ("Sistema (apt, limpiar Docker)", "System (apt, clean up Docker)"),
     "menu.config": ("Configuración (idioma, ruta de contenedores)", "Setup (language, containers folder)"),
     "menu.exit": ("Salir", "Exit"),
@@ -184,6 +191,8 @@ STR = {
   eva update [stack|all] [--force]
                             actualiza solo los que tienen novedades + prune
   eva up|down|restart [stack|all]
+  eva container up|restart|down [nombre]
+                            start / restart / stop de un contenedor
   eva system update|upgrade|clean|docker
                             apt update+upgrade / full-upgrade / autoremove / limpiar Docker
   eva prune                 docker system prune -a --volumes -f
@@ -205,6 +214,8 @@ STR = {
   eva update [stack|all] [--force]
                             update only stacks that have news + prune
   eva up|down|restart [stack|all]
+  eva container up|restart|down [name]
+                            start / restart / stop one container
   eva system update|upgrade|clean|docker
                             apt update+upgrade / full-upgrade / autoremove / Docker cleanup
   eva prune                 docker system prune -a --volumes -f
@@ -314,6 +325,10 @@ _eva() {
     update) compadd -- all --force ${(f)"$(eva _complete stacks 2>/dev/null)"} ;;
     check|up|down|restart) compadd -- all ${(f)"$(eva _complete stacks 2>/dev/null)"} ;;
     logs) compadd -- ${(f)"$(eva _complete containers 2>/dev/null)"} ;;
+    container)
+      if (( CURRENT == 3 )); then compadd -- up restart down
+      elif (( CURRENT == 4 )); then compadd -- ${(f)"$(eva _complete containers 2>/dev/null)"}
+      fi ;;
   esac
 }
 compdef _eva eva
@@ -331,6 +346,10 @@ BASH_COMPLETION = r"""_eva() {
     update) COMPREPLY=( $(compgen -W "all --force $(eva _complete stacks 2>/dev/null)" -- "$cur") ) ;;
     check|up|down|restart) COMPREPLY=( $(compgen -W "all $(eva _complete stacks 2>/dev/null)" -- "$cur") ) ;;
     logs) COMPREPLY=( $(compgen -W "$(eva _complete containers 2>/dev/null)" -- "$cur") ) ;;
+    container)
+      if [[ $COMP_CWORD -eq 2 ]]; then COMPREPLY=( $(compgen -W "up restart down" -- "$cur") )
+      elif [[ $COMP_CWORD -eq 3 ]]; then COMPREPLY=( $(compgen -W "$(eva _complete containers 2>/dev/null)" -- "$cur") )
+      fi ;;
   esac
 }
 complete -F _eva eva
@@ -339,7 +358,7 @@ complete -F _eva eva
 COMP_COMMANDS = [
     ("containers", "d.containers"), ("stacks", "d.stacks"), ("status", "d.status"),
     ("logs", "d.logs"), ("check", "d.check"), ("update", "d.update"),
-    ("up", "d.up"), ("down", "d.down"), ("restart", "d.restart"),
+    ("up", "d.up"), ("down", "d.down"), ("restart", "d.restart"), ("container", "d.container"),
     ("system", "d.system"), ("prune", "d.prune"), ("install", "d.install"),
     ("doctor", "d.doctor"), ("update-self", "d.update_self"), ("version", "d.version"),
 ]
@@ -987,6 +1006,37 @@ def cmd_update(name=None, force=False):
         ok(t("all_updated"))
 
 
+CONTAINER_VERBS = {"up": "start", "restart": "restart", "down": "stop"}
+
+
+def cmd_container(action=None, name=None):
+    """up/restart/down of ONE container (docker start / restart / stop)."""
+    if action is None:
+        keys = list(CONTAINER_VERBS)
+        sel = pick(t("ct.action"), [f"{k}  {D}(docker {CONTAINER_VERBS[k]}){R}" for k in keys])
+        if sel is None:
+            return
+        action = keys[sel]
+    if action not in CONTAINER_VERBS:
+        err(t("sys.invalid", a=action, opts=", ".join(CONTAINER_VERBS)))
+        return
+    cts = containers()
+    if name is None:
+        idx = pick(t("ct.pick", action=action), [
+            f"{dot(c)} {c['name']}  {D}({c['stack']}) · {c['status']}{R}" for c in cts])
+        if idx is None:
+            return
+        name = cts[idx]["name"]
+    elif name not in [c["name"] for c in cts]:
+        err(t("ct.notfound", name=name))
+        return
+    r = run(["docker", CONTAINER_VERBS[action], name], timeout=120)
+    if r.returncode == 0:
+        ok(t("ct.ok", name=name, action=action))
+    else:
+        err(f"{name}: {r.stderr.strip()}")
+
+
 def cmd_compose(action, name=None):
     stacks = find_stacks()
     if name is None:
@@ -1082,14 +1132,45 @@ def cmd_status():
 
 
 # ── menu ─────────────────────────────────────────────────────
+def pause():
+    print(f"\n{D}{t('menu.back')}{R}", flush=True)
+    while not wait_key() and sys.stdin.isatty():
+        pass
+
+
+def cmd_stack_action():
+    act = pick(t("compose.action"), ["up", "restart", "down"])
+    if act is not None:
+        cmd_compose(["up", "restart", "down"][act])
+
+
+CONTAINERS_MENU = [
+    ("menu.ps", lambda: cmd_ps(show_all=True)),
+    ("menu.stacks", cmd_stacks),
+    ("menu.logs", cmd_logs),
+    ("menu.ctaction", cmd_container),
+    ("menu.stackaction", cmd_stack_action),
+]
+
+
+def containers_menu():
+    while True:
+        clear()
+        banner(t("menu.containers"), "eva")
+        sel = pick(t("menu.question"), [t(label) for label, _ in CONTAINERS_MENU])
+        if sel is None:
+            return
+        label, fn = CONTAINERS_MENU[sel]
+        fn()
+        if not CANCELLED and fn is not cmd_logs:  # logs end with Ctrl+C
+            pause()
+
+
 MENU = [
-    ("1", "menu.ps", lambda: cmd_ps(show_all=True)),
-    ("2", "menu.stacks", cmd_stacks),
-    ("3", "menu.logs", cmd_logs),
-    ("4", "menu.update", cmd_update),
-    ("5", "menu.compose", None),
-    ("6", "menu.system", cmd_system),
-    ("7", "menu.config", cmd_install),
+    ("1", "menu.containers", containers_menu),
+    ("2", "menu.update", cmd_update),
+    ("3", "menu.system", cmd_system),
+    ("4", "menu.config", cmd_install),
     ("0", "menu.exit", None),
 ]
 
@@ -1111,21 +1192,13 @@ def _menu_loop():
         dashboard()
         print()
         sel = pick(t("menu.question"), [
-            t(label) + (f" {YELLOW}⬆{R}" if behind and key == "6" else "") for key, label, _ in MENU])
+            t(label) + (f" {YELLOW}⬆{R}" if behind and key == "3" else "") for key, label, _ in MENU])
         if sel is None or MENU[sel][0] == "0":
             return
         key, _, fn = MENU[sel]
-        if key == "5":
-            act = pick(t("compose.action"), ["up", "down", "restart"])
-            if act is None:
-                continue
-            cmd_compose(["up", "down", "restart"][act])
-        else:
-            fn()
-        if key != "3" and not CANCELLED:
-            print(f"\n{D}{t('menu.back')}{R}", flush=True)
-            while not wait_key() and sys.stdin.isatty():
-                pass
+        fn()
+        if key != "1" and not CANCELLED:  # containers_menu pauses by itself
+            pause()
 
 
 def usage():
@@ -1189,6 +1262,7 @@ def main(argv):
         "logs": lambda: cmd_logs(arg),
         "update": lambda: cmd_update(arg if arg != "--force" else None, "--force" in flags),
         "prune": docker_prune, "docker-prune": docker_prune,
+        "container": lambda: cmd_container(arg, rest[1] if len(rest) > 1 else None),
         "up": lambda: cmd_compose("up", arg),
         "down": lambda: cmd_compose("down", arg),
         "restart": lambda: cmd_compose("restart", arg),
