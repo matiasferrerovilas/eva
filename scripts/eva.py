@@ -99,6 +99,12 @@ def cmd_install():
         ROOT = path
         ok(f"{ENV_KEY}={path}")
         ok(f"{len(find_stacks())} stack(s) encontrados")
+        cur_ex = read_env().get("excluded_stacks", "")
+        raw = input(f"\n{CYAN}❯{R} Stacks a excluir del update/check masivo, separados por coma "
+                    f"[{cur_ex or 'ninguno'}] ('-' para vaciar): ").strip()
+        if raw:
+            write_env("excluded_stacks", "" if raw == "-" else raw)
+            ok(f"excluded_stacks={read_env().get('excluded_stacks', '')}")
         me = Path(__file__).resolve()
         target = Path("/usr/local/bin/eva")
         if not (target.is_symlink() and target.resolve() == me):
@@ -125,13 +131,26 @@ def run(cmd, cwd=None, timeout=None):
         return subprocess.CompletedProcess(cmd, 124, "", "timeout")
 
 
+COMPOSE_NAMES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
+
+
 def find_stacks():
     found = []
     for dirpath, dirnames, filenames in os.walk(ROOT):
         dirnames[:] = [d for d in dirnames if d not in PRUNE_DIRS]
-        if "compose.yml" in filenames:
-            found.append(Path(dirpath) / "compose.yml")
+        name = next((n for n in COMPOSE_NAMES if n in filenames), None)
+        if name:
+            found.append(Path(dirpath) / name)
     return sorted(found)
+
+
+def excluded_stacks():
+    """Stack names skipped by bulk update/check ('all'), from config `excluded_stacks`."""
+    raw = read_env().get("excluded_stacks", "")
+    return {n.strip() for n in raw.split(",") if n.strip()}
+
+
+SKIPPED = []  # names left out of the last bulk selection, for display
 
 
 def find_stack(name):
@@ -467,14 +486,25 @@ def pending_stacks(result):
 
 def resolve_targets(name, title, stacks):
     """Pick stack(s) interactively (name None), or by name/'all'. None = cancelled/not found."""
+    global SKIPPED
+    SKIPPED = []
+    ex = excluded_stacks()
+
+    def bulk():
+        global SKIPPED
+        SKIPPED = [s.parent.name for s in stacks if s.parent.name in ex]
+        return [s for s in stacks if s.parent.name not in ex]
+
     if name is None:
-        labels = [f"{s.parent.name}  {D}{s.parent.relative_to(ROOT)}{R}" for s in stacks]
+        tag = "  (excluido de 'todos')"
+        labels = [f"{s.parent.name}  {D}{s.parent.relative_to(ROOT)}"
+                  f"{tag if s.parent.name in ex else ''}{R}" for s in stacks]
         sel = pick(title, labels, extra=[("a", f"{B}Todos los stacks{R}")])
         if sel is None:
             return None
-        return stacks if sel == "a" else [stacks[sel]]
+        return bulk() if sel == "a" else [stacks[sel]]
     if name == "all":
-        return stacks
+        return bulk()
     s = find_stack(name)
     if not s:
         err(f"Stack '{name}' no encontrado")
@@ -487,6 +517,8 @@ def cmd_check(name=None):
     if not targets:
         return
     banner("🔎 Novedades", f"{len(targets)} stack(s)")
+    if SKIPPED:
+        info(f"Excluidos por config: {', '.join(SKIPPED)}")
     info("Consultando registries...")
     result = check_updates(targets)
     print()
@@ -501,6 +533,8 @@ def cmd_update(name=None, force=False):
     if not targets:
         return
     banner("🔄 Update", f"{len(targets)} stack(s)")
+    if SKIPPED:
+        info(f"Excluidos por config: {', '.join(SKIPPED)}")
     info("Buscando novedades...")
     result = check_updates(targets)
     print()
