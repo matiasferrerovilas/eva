@@ -6,6 +6,7 @@ import os
 import shutil
 import select
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 import sys
 import termios
 import time
@@ -17,6 +18,7 @@ CONFIG_DIR = BASE / "config"
 ENV_FILE = CONFIG_DIR / ".env"
 ENV_KEY = "containers_location"
 ROOT = None  # set by load_config()
+CANCELLED = False  # set by pick() when the user backs out (Esc / Ctrl+C)
 PRUNE_DIRS = {
     ".git", "data", "letsencrypt", "uploads", "upload", "database",
     "model-cache", "cache", "logs", "tmp",
@@ -116,8 +118,11 @@ def info(msg): print(f"{BLUE}•{R} {msg}")
 
 
 # ── docker helpers ───────────────────────────────────────────
-def run(cmd, cwd=None):
-    return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+def run(cmd, cwd=None, timeout=None):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 124, "", "timeout")
 
 
 def find_stacks():
@@ -193,6 +198,8 @@ def read_key():
 
 def pick(title, items, extra=None):
     """Arrow-key picker. Returns index, an extra key, or None (cancel)."""
+    global CANCELLED
+    CANCELLED = False
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return pick_numbered(title, items, extra)
     entries = [(k, lbl) for k, lbl in extra or []] + [(i, lbl) for i, lbl in enumerate(items)]
@@ -219,10 +226,12 @@ def pick(title, items, extra=None):
                 clear()
                 return entries[cur][0]
             elif key == "esc":
+                CANCELLED = True
                 clear()
                 return None
             print(f"\033[{len(entries)}A", end="")
     except KeyboardInterrupt:
+        CANCELLED = True
         clear()
         return None
     finally:
@@ -411,25 +420,109 @@ def docker_prune():
     ok(tail) if r.returncode == 0 else err(r.stderr.strip())
 
 
-def cmd_update(name=None):
-    stacks = find_stacks()
+def stack_images_of(compose):
+    cfg = run(["docker", "compose", "config", "--images"], cwd=str(compose.parent))
+    return sorted({i.strip() for i in cfg.stdout.splitlines() if i.strip()})
+
+
+def image_state(img):
+    """'new' | 'ok' | 'missing' (not pulled yet) | 'unknown' (no remote digest)."""
+    r = run(["docker", "image", "inspect", img, "--format", "{{json .RepoDigests}}"])
+    if r.returncode != 0:
+        return "missing"
+    local = {d.split("@")[1] for d in json.loads(r.stdout or "[]") if "@" in d}
+    remote = run(["docker", "buildx", "imagetools", "inspect", img,
+                  "--format", "{{.Manifest.Digest}}"], timeout=30)
+    digest = remote.stdout.strip()
+    if remote.returncode != 0 or not digest.startswith("sha256:"):
+        return "unknown"
+    return "ok" if digest in local else "new"
+
+
+def check_updates(targets):
+    """Compare local vs registry digests, in parallel. -> {stack: [(image, state)]}"""
+    pairs = [(t, img) for t in targets for img in stack_images_of(t)]
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        states = list(pool.map(lambda p: image_state(p[1]), pairs))
+    result = {t: [] for t in targets}
+    for (t, img), st in zip(pairs, states):
+        result[t].append((img, st))
+    return result
+
+
+def render_check(result):
+    labels = {"new": (YELLOW, "⬆ nueva versión"), "ok": (GREEN, "✔ al día"),
+              "missing": (YELLOW, "⬇ sin descargar"), "unknown": (D, "? sin info remota")}
+    nw = max((len(t.parent.name) for t in result), default=5)
+    for t, imgs in result.items():
+        print(f" {B}{t.parent.name.ljust(nw)}{R}")
+        for img, st in imgs:
+            col, txt = labels[st]
+            print(f"   {col}{txt.ljust(18)}{R} {D}{img.split('@')[0]}{R}")
+
+
+def pending_stacks(result):
+    return [t for t, imgs in result.items() if any(s in ("new", "missing") for _, s in imgs)]
+
+
+def resolve_targets(name, title, stacks):
+    """Pick stack(s) interactively (name None), or by name/'all'. None = cancelled/not found."""
     if name is None:
         labels = [f"{s.parent.name}  {D}{s.parent.relative_to(ROOT)}{R}" for s in stacks]
-        sel = pick("🔄 ¿Qué actualizar?", labels, extra=[("a", f"{B}Todos los stacks{R}")])
+        sel = pick(title, labels, extra=[("a", f"{B}Todos los stacks{R}")])
+        if sel is None:
+            return None
+        return stacks if sel == "a" else [stacks[sel]]
+    if name == "all":
+        return stacks
+    s = find_stack(name)
+    if not s:
+        err(f"Stack '{name}' no encontrado")
+        return None
+    return [s]
+
+
+def cmd_check(name=None):
+    targets = resolve_targets(name, "🔎 ¿Qué stacks chequear?", find_stacks())
+    if not targets:
+        return
+    banner("🔎 Novedades", f"{len(targets)} stack(s)")
+    info("Consultando registries...")
+    result = check_updates(targets)
+    print()
+    render_check(result)
+    n = len(pending_stacks(result))
+    print(line())
+    (warn if n else ok)(f"{n} stack(s) con novedades" if n else "Todo al día")
+
+
+def cmd_update(name=None, force=False):
+    targets = resolve_targets(name, "🔄 ¿Qué actualizar?", find_stacks())
+    if not targets:
+        return
+    banner("🔄 Update", f"{len(targets)} stack(s)")
+    info("Buscando novedades...")
+    result = check_updates(targets)
+    print()
+    render_check(result)
+    pend = pending_stacks(result)
+    print(line())
+    chosen = targets if force else pend
+    if name is None and sys.stdin.isatty() and not force:
+        if not pend:
+            ok("Todo al día, no hay nada que actualizar")
+            return
+        sel = pick(f"{len(pend)} stack(s) con novedades", [
+            f"Actualizar solo los que tienen novedades ({', '.join(t.parent.name for t in pend)})",
+            f"Forzar los {len(targets)} seleccionados"])
         if sel is None:
             return
-        targets = stacks if sel == "a" else [stacks[sel]]
-    elif name == "all":
-        targets = stacks
-    else:
-        s = find_stack(name)
-        if not s:
-            err(f"Stack '{name}' no encontrado")
-            return
-        targets = [s]
-
-    banner("🔄 Update", f"{len(targets)} stack(s)")
-    failed = [t.parent.name for t in targets if not update_stack(t)]
+        chosen = pend if sel == 0 else targets
+    elif not chosen:
+        ok("Todo al día, no hay nada que actualizar")
+        return
+    banner("🔄 Update", f"{len(chosen)} stack(s)")
+    failed = [t.parent.name for t in chosen if not update_stack(t)]
     docker_prune()
     print(line())
     if failed:
@@ -461,25 +554,103 @@ def cmd_compose(action, name=None):
             f"{t.parent.name}: {r.stderr.strip()}")
 
 
+# ── dashboard (system stats + container health) ──────────────
+def bar(pct, warn_at=60, crit_at=80, size=16):
+    pct = max(0.0, min(100.0, pct))
+    col = GREEN if pct < warn_at else YELLOW if pct < crit_at else RED
+    fill = round(size * pct / 100)
+    return f"{col}{'█' * fill}{D}{'░' * (size - fill)}{R}"
+
+
+def cpu_temp():
+    r = run(["vcgencmd", "measure_temp"]) if shutil.which("vcgencmd") else None
+    if r and r.returncode == 0 and "=" in r.stdout:
+        return float(r.stdout.split("=")[1].split("'")[0])
+    try:
+        return int(Path("/sys/class/thermal/thermal_zone0/temp").read_text()) / 1000
+    except (OSError, ValueError):
+        return None
+
+
+def mem_info():
+    try:
+        m = {k: int(v.split()[0]) for k, v in (
+            ln.split(":", 1) for ln in Path("/proc/meminfo").read_text().splitlines())}
+        return (m["MemTotal"] - m["MemAvailable"]) / 1048576, m["MemTotal"] / 1048576
+    except (OSError, KeyError, ValueError):
+        return None
+
+
+def uptime_str():
+    try:
+        s = int(float(Path("/proc/uptime").read_text().split()[0]))
+    except (OSError, ValueError):
+        return "?"
+    d, h, m = s // 86400, s % 86400 // 3600, s % 3600 // 60
+    return f"{d}d {h}h" if d else f"{h}h {m}m"
+
+
+def dashboard():
+    rows = []
+    t = cpu_temp()
+    if t is not None:  # Pi throttles ~80°C
+        rows.append(("Temp", bar(t, 60, 75), f"{t:.1f}°C"))
+    mem = mem_info()
+    if mem:
+        rows.append(("RAM", bar(mem[0] / mem[1] * 100), f"{mem[0]:.1f} / {mem[1]:.1f} GB"))
+    du = shutil.disk_usage("/")
+    rows.append(("Disco", bar(du.used / du.total * 100, 70, 90), f"{du.used / 1e9:.0f} / {du.total / 1e9:.0f} GB"))
+    load, cpus = os.getloadavg()[0], os.cpu_count() or 1
+    rows.append(("CPU", bar(load / cpus * 100), f"load {load:.2f} · {cpus} cores · up {uptime_str()}"))
+    print()
+    for label, b, val in rows:
+        print(f" {B}{label.ljust(6)}{R}{b}  {val}")
+    cts = containers()
+    up = sum(1 for c in cts if c["state"] == "running")
+    bad = [c for c in cts if dot(c) != f"{GREEN}●{R}"]
+    col = GREEN if not bad else YELLOW
+    print(f"\n {col}●{R} {B}{up}/{len(cts)}{R} contenedores running")
+    for c in bad[:5]:
+        print(f"   {RED}✘{R} {c['name']}  {D}{c['status']}{R}")
+    if len(bad) > 5:
+        print(f"   {D}… y {len(bad) - 5} más{R}")
+
+
+def cmd_status():
+    banner("📊 Estado", "homelab")
+    dashboard()
+    print()
+    cmd_stacks()
+
+
 # ── menu ─────────────────────────────────────────────────────
 MENU = [
     ("1", "Listar contenedores", lambda: cmd_ps(show_all=True)),
     ("2", "Listar stacks", cmd_stacks),
     ("3", "Ver logs", cmd_logs),
-    ("4", "Update (pull + recrear + prune)", cmd_update),
+    ("4", "Update (ver novedades, pull, recrear, prune)", cmd_update),
     ("5", "Up / Down / Restart", None),
     ("6", "Sistema (apt, limpiar Docker)", cmd_system),
     ("7", "Configuración (ruta de contenedores)", cmd_install),
+    ("0", "Salir", None),
 ]
 
 
 def menu():
+    try:
+        _menu_loop()
+    finally:
+        clear()
+
+
+def _menu_loop():
     while True:
         clear()
         banner("🏠 EVA", "homelab")
+        dashboard()
+        print()
         sel = pick("¿Qué querés hacer?", [label for _, label, _ in MENU])
-        if sel is None:
-            print(f"{D}Chau 👋{R}\n")
+        if sel is None or MENU[sel][0] == "0":
             return
         key, _, fn = MENU[sel]
         if key == "5":
@@ -489,7 +660,7 @@ def menu():
             cmd_compose(["up", "down", "restart"][act])
         else:
             fn()
-        if key != "3":
+        if key != "3" and not CANCELLED:
             print(f"\n{D}Esc / Enter para volver al menú{R}", flush=True)
             while not wait_key() and sys.stdin.isatty():
                 pass
@@ -505,7 +676,10 @@ USAGE = """eva — homelab CLI
   eva system update|upgrade|clean|docker
                             apt update+upgrade / full-upgrade / autoremove
   eva logs [contenedor]     seguir logs
-  eva update [stack|all]    pull + recrear + prune
+  eva status                temperatura, RAM, disco, salud y stacks
+  eva check [stack|all]     ver qué stacks tienen imagen nueva (sin descargar)
+  eva update [stack|all] [--force]
+                            actualiza solo los que tienen novedades + prune
   eva up|down|restart [stack|all]
   eva prune                 docker system prune -a --volumes -f
 """
@@ -533,8 +707,10 @@ def main(argv):
         "ps": lambda: cmd_ps("-a" in flags, "-w" in flags, interval),
         "system": lambda: cmd_system(arg),
         "upgrade": lambda: cmd_system("upgrade"), "clean": lambda: cmd_system("clean"),
-        "stacks": cmd_stacks, "status": cmd_stacks,
-        "logs": lambda: cmd_logs(arg), "update": lambda: cmd_update(arg),
+        "stacks": cmd_stacks, "status": cmd_status,
+        "check": lambda: cmd_check(arg),
+        "logs": lambda: cmd_logs(arg),
+        "update": lambda: cmd_update(arg if arg != "--force" else None, "--force" in flags),
         "prune": docker_prune, "docker-prune": docker_prune,
         "up": lambda: cmd_compose("up", arg),
         "down": lambda: cmd_compose("down", arg),
