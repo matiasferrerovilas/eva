@@ -2,7 +2,7 @@
 
 A small, dependency-free terminal CLI to run a Docker Compose homelab from one place: see what is running, follow logs, check which images have updates, and update stacks with an arrow-key menu.
 
-Built on a Raspberry Pi 5, but it works on any Linux host with Docker.
+It works on any Linux host with Docker, from a Raspberry Pi to a server. eva only manages the stacks you point it to: your own compose files live in a separate folder, outside this repository.
 
 ```
 ╭──────────────────────────────────────────────────────────────╮
@@ -55,8 +55,8 @@ eva checks these requirements every time it starts and tells you what to fix. Fo
 ## Install
 
 ```bash
-git clone https://github.com/matiasferrerovilas/homelab.git /opt/homelab
-/opt/homelab/scripts/eva.py install
+git clone <this-repo-url> ~/eva
+~/eva/scripts/eva.py install
 ```
 
 `eva install` will:
@@ -73,16 +73,19 @@ If you run `eva` before configuring it, the installer opens by itself.
 ## Layout
 
 ```
-eva/
+~/eva/                   this repository
 ├── scripts/eva.py       the CLI
-├── config/
-│   ├── .env             your settings (git-ignored)
-│   └── .env.example     reference
-└── services/            your stacks, one folder each (path is configurable)
-    ├── immich/compose.yml
-    └── infrastructure/
-        └── npm/compose.yml
+└── config/
+    ├── .env             your settings (git-ignored)
+    └── .env.example     reference
+
+/srv/stacks/             your stacks: anywhere you like, set during `eva install`
+├── blog/compose.yml
+└── infra/
+    └── proxy/compose.yml
 ```
+
+Keep your stacks out of this repository: they usually contain secrets and data. (`services/` is git-ignored here as a safety net.)
 
 Stacks are found recursively under `containers_location`. The stack name is the name of the folder that holds the compose file. The files `compose.yaml`, `compose.yml`, `docker-compose.yaml` and `docker-compose.yml` are recognized.
 Folders named `data`, `cache`, `logs`, `tmp`, `uploads`, `database`, `letsencrypt`, `model-cache` and `.git` are skipped.
@@ -100,9 +103,9 @@ Folders named `data`, `cache`, `logs`, `tmp`, `uploads`, `database`, `letsencryp
 Example:
 
 ```
-containers_location=/opt/homelab/services
+containers_location=/srv/stacks
 language=en
-excluded_stacks=dbs,keycloak
+excluded_stacks=db,proxy
 ```
 
 Excluding is useful for stacks pinned to `:latest` where a major upgrade could break your data, like a database.
