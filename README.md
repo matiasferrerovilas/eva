@@ -5,6 +5,7 @@
 **La consola de tu homelab: contenedores, logs y actualizaciones desde un menú.**
 Mirá qué está corriendo, seguí logs, enterate de qué imágenes tienen novedades y actualizá tus stacks de Docker Compose con las flechas del teclado.
 
+[![CI](https://github.com/matiasferrerovilas/eva/actions/workflows/ci.yml/badge.svg)](https://github.com/matiasferrerovilas/eva/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.8%2B-3776ab?logo=python&logoColor=white)
 ![Docker Compose](https://img.shields.io/badge/Docker%20Compose-2496ed?logo=docker&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-host-fcc624?logo=linux&logoColor=black)
@@ -192,6 +193,7 @@ Tus stacks van **fuera** de este repo, por ejemplo en `/srv/stacks`: suelen tene
 - Los issues y pull requests son bienvenidos.
 - Commits con [Conventional Commits](https://www.conventionalcommits.org/es/v1.0.0/) (`feat:`, `fix:`, `docs:`...).
 - Cada cambio se anota en el [CHANGELOG](CHANGELOG.md).
+- Los tests no necesitan Docker: `python3 -m unittest discover -s tests`. El CI los corre en Python 3.8 a 3.13 y pasa `ruff`.
 - Para agregar un idioma, sumá una columna a la tabla `STR` de `scripts/eva.py` y su código a `LANGS`.
 - En la lista de ideas: backup de volúmenes, notificaciones, update programado con rollback y shell dentro de un contenedor.
 

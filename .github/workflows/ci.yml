@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: pip install ruff
+      # Only real errors (syntax errors, undefined names, unused imports/variables).
+      - name: Ruff
+        run: ruff check --select E9,F scripts tests
+
+  test:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-22.04 # 3.8 is not available on ubuntu-24.04 runners
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install zsh (to syntax-check the zsh completion)
+        run: sudo apt-get update && sudo apt-get install -y zsh
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Smoke test the CLI
+        run: |
+          python scripts/eva.py --version
+          python scripts/eva.py --help
+          python scripts/eva.py completion bash | bash -n
+          python scripts/eva.py completion zsh | zsh -n

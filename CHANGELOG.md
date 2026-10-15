@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- CI en GitHub Actions: `ruff` y tests en Python 3.8 a 3.13, más una prueba de humo del CLI y de
+  la sintaxis de los scripts de autocompletado (bash y zsh).
+- Tests unitarios (`tests/test_eva.py`, solo biblioteca estándar, sin Docker): traducciones,
+  configuración, detección de stacks y exclusiones, autocompletado y comparación de digests.
+
 ### Fixed
 - Ver logs: ya no vuelve al menú a los pocos segundos con un contenedor que se reinicia. `docker
   logs -f` termina cuando el contenedor se detiene o reinicia, así que eva reconecta mientras el
