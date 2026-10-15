@@ -113,6 +113,10 @@ STR = {
     "logs.pick": ("📜 ¿Logs de qué contenedor?", "📜 Logs of which container?"),
     "logs.follow": ("Siguiendo logs de {name} — Ctrl+C para volver",
                     "Following logs of {name} — Ctrl+C to go back"),
+    "logs.reconnect": ("El contenedor se reinició o cortó el stream; reconectando...",
+                       "The container restarted or the stream dropped; reconnecting..."),
+    "logs.stopped": ("{name} está en estado '{status}'. Fin de los logs.",
+                     "{name} is '{status}'. End of logs."),
     "pull.fail": ("{name}: pull falló\n{out}", "{name}: pull failed\n{out}"),
     "up.fail": ("{name}: up falló\n{out}", "{name}: up failed\n{out}"),
     "upd.new": ("{name}: imagen nueva, contenedor recreado", "{name}: new image, container recreated"),
@@ -833,6 +837,7 @@ def cmd_stacks():
 
 
 def cmd_logs(name=None):
+    menu_flow = name is None  # picked from the menu: keep the screen until a key is pressed
     cts = containers()
     if name is None:
         labels = [f"{dot(c)} {c['name']}  {D}({c['stack']}){R}" for c in cts]
@@ -841,11 +846,27 @@ def cmd_logs(name=None):
             return
         name = cts[idx]["name"]
     print(f"\n{D}{t('logs.follow', name=name)}{R}\n")
+    since = None
+    status = "?"
     try:
-        subprocess.run(["docker", "logs", "-f", "--tail", "100", name])
+        # `docker logs -f` ends whenever the container stops or restarts, so reconnect
+        # while it is running/restarting (e.g. a crash loop) instead of leaving the screen.
+        while True:
+            when = ["--since", str(since)] if since else ["--tail", "100"]
+            subprocess.run(["docker", "logs", "-f", *when, name])
+            since = int(time.time())
+            state = run(["docker", "inspect", name, "--format", "{{.State.Status}}"]).stdout.strip()
+            status = state or "removed"
+            if state not in ("running", "restarting"):
+                break
+            print(f"{D}↻ {t('logs.reconnect')}{R}", flush=True)
+            time.sleep(1)
     except KeyboardInterrupt:
-        pass
-    print()
+        print()
+        return
+    print(f"\n{YELLOW}■{R} {t('logs.stopped', name=name, status=status)}")
+    if menu_flow:
+        pause()
 
 
 def image_ids(images):

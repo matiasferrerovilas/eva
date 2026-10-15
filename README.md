@@ -48,7 +48,7 @@ eva revisa estos requisitos cada vez que arranca y te dice qué arreglar. Por ej
 
 ```bash
 # 1. Clonar
-git clone <url-de-este-repo> ~/eva
+git clone https://github.com/matiasferrerovilas/eva.git ~/eva
 cd ~/eva
 
 # 2. Configurar (idioma, carpeta de stacks, comando y autocompletado)
