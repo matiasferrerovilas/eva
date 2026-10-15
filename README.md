@@ -22,11 +22,12 @@ Mirá qué está corriendo, seguí logs, enterate de qué imágenes tienen noved
 | Área | Para qué sirve |
 | --- | --- |
 | **Estado de un vistazo** | Temperatura, RAM, disco, carga y cuántos contenedores están sanos, con barras que cambian de color. |
-| **Contenedores y stacks** | Listá contenedores con su estado, redes y puertos (con modo watch) y los stacks con su salud. |
+| **Contenedores y stacks** | Listá contenedores y stacks con su estado, **CPU y RAM en vivo**, redes y puertos. Desde el menú se refrescan solos hasta que apretás `Esc`. |
 | **Logs** | Elegí un contenedor de la lista y seguí sus logs en vivo. |
 | **Update con vista previa** | Compara el digest de cada imagen contra el registry **sin descargar nada**, te muestra qué stacks tienen novedades y recién ahí hace `pull` y recrea. |
 | **Up / restart / down** | Sobre un solo contenedor, sobre un stack o sobre todos. |
-| **Sistema** | `apt update/upgrade`, limpieza de paquetes y limpieza de Docker, desde el mismo menú. |
+| **Sistema** | `apt update/upgrade`, limpieza de paquetes y limpieza de Docker **con vista previa** de lo que se borraría, desde el mismo menú. |
+| **Sin sorpresas** | Lo destructivo (bajar stacks, limpiar volúmenes) muestra qué va a pasar y pide confirmación. |
 | **Comodidades** | Navegación con flechas (`Esc` vuelve un nivel), autocompletado de zsh/bash, español e inglés, y `eva update-self` para actualizarse solo. |
 
 eva solo administra los stacks que le indiques: tus `compose.yml` viven en una carpeta aparte, fuera de este repositorio.
@@ -137,14 +138,16 @@ eva update all
 | --- | --- |
 | `eva` | Abre el menú interactivo. |
 | `eva status` | Temperatura, RAM, disco, salud y lista de stacks. |
-| `eva containers [-a] [-w] [-i N]` | Contenedores con redes y puertos. `-a` todos, `-w` watch, `-i` intervalo. |
-| `eva stacks` | Lista los stacks. |
+| `eva containers [-a] [-w] [-i N]` | Contenedores con CPU, RAM, redes y puertos. `-a` todos, `-w` en vivo, `-i` intervalo. |
+| `eva stacks [-w] [-i N]` | Lista los stacks con su CPU y RAM. `-w` en vivo. |
 | `eva logs [contenedor]` | Sigue los logs de un contenedor. |
 | `eva check [stack\|all]` | Muestra qué stacks tienen una imagen más nueva, sin descargar. |
 | `eva update [stack\|all] [--force]` | Actualiza los stacks con novedades y limpia Docker. `--force` actualiza todos los elegidos. |
-| `eva up\|down\|restart [stack\|all]` | Acciones de Compose sobre un stack. `down` elimina sus contenedores (los volúmenes se conservan). |
+| `eva up\|down\|restart [stack\|all]` | Acciones de Compose sobre un stack. `down` elimina sus contenedores (los volúmenes se conservan) y **pide confirmación**. |
 | `eva container up\|restart\|down [nombre]` | Un solo contenedor: `docker start`, `restart` o `stop`. |
-| `eva system update\|upgrade\|clean\|docker` | `apt update`+`upgrade`, `full-upgrade`, `autoremove` o limpieza de Docker. |
+| `eva system update\|upgrade\|clean\|docker` | `apt update`+`upgrade`, `full-upgrade`, `autoremove` o limpieza de Docker (con vista previa). |
+| `eva prune [--all\|--volumes]` | Limpieza de Docker. Por defecto es la **segura**; `--all` y `--volumes` piden confirmación. |
+| `--yes` | En cualquier comando: omite las confirmaciones (obligatorio si no hay terminal, por ejemplo en scripts). |
 | `eva doctor` | Diagnóstico de requisitos y configuración. |
 | `eva install` | Configura o reconfigura eva. |
 | `eva update-self` | Se actualiza con `git pull --ff-only` (necesita un clon de git con upstream). |
@@ -179,11 +182,11 @@ Tus stacks van **fuera** de este repo, por ejemplo en `/srv/stacks`: suelen tene
 1. Por cada imagen de los stacks elegidos, eva lee el digest en el registry (`docker buildx imagetools inspect`) y lo compara con el local.
 2. Te muestra qué está nuevo, al día, sin descargar o sin información.
 3. Para los stacks que confirmes: `docker compose pull` y `docker compose up -d --remove-orphans` (solo se recrean los contenedores cuya imagen cambió).
-4. Termina con una limpieza de Docker.
+4. Termina borrando las imágenes viejas sin etiqueta que el pull dejó atrás (nunca toca volúmenes ni contenedores).
 
 ## Ojo con
 
-- La limpieza de Docker ejecuta `docker system prune -a --volumes -f`: elimina **volúmenes sin uso**, incluidos los de los stacks que estén caídos en ese momento. Hacé backup antes si te importan esos datos.
+- La limpieza de Docker tiene tres niveles y te muestra de antemano qué se borraría: **segura** (imágenes viejas sin etiqueta y caché de build), **completa** (además imágenes sin uso, contenedores detenidos y redes sin uso) y **completa + volúmenes**. Este último elimina los volúmenes sin uso, incluidos los de los stacks que estén caídos en ese momento: hacé backup antes si te importan esos datos.
 - Actualizar imágenes `:latest` puede saltar de versión mayor. Fijá versiones o usá `excluded_stacks` para las bases de datos.
 - `Esc` no interrumpe los logs en vivo ni los prompts de texto: ahí usá `Ctrl+C`.
 - Si movés la carpeta de un stack, recrealo desde la ruta nueva (`docker compose up -d --force-recreate`): los contenedores existentes siguen apuntando a la ruta vieja.

@@ -214,5 +214,191 @@ class UpdateCheckTests(unittest.TestCase):
             self.assertEqual(eva.image_state("repo/app"), "missing")
 
 
+class StatsTests(unittest.TestCase):
+    def test_parse_size(self):
+        self.assertAlmostEqual(eva.parse_size("245.3MiB"), 245.3 * 1024 ** 2)
+        self.assertAlmostEqual(eva.parse_size("1.5GB"), 1.5e9)
+        self.assertEqual(eva.parse_size("12B"), 12)
+        self.assertEqual(eva.parse_size(""), 0)
+        self.assertEqual(eva.parse_size(None), 0)
+
+    def test_human(self):
+        self.assertEqual(eva.human(512), "512 B")
+        self.assertEqual(eva.human(2048), "2.0 KiB")
+        self.assertEqual(eva.human(5 * 1024 ** 2), "5.0 MiB")
+        self.assertEqual(eva.human(3 * 1024 ** 3), "3.00 GiB")
+
+    def test_container_stats_parses_docker_output(self):
+        out = "\n".join([
+            '{"Name":"api","CPUPerc":"12.50%","MemUsage":"245.3MiB / 7.8GiB","MemPerc":"3.05%"}',
+            "not json",
+            '{"Name":"db","CPUPerc":"--","MemUsage":"1GiB / 7.8GiB","MemPerc":"--"}',
+        ])
+        with mock.patch.object(eva, "run", return_value=subprocess.CompletedProcess([], 0, out, "")):
+            stats = eva.container_stats()
+        self.assertEqual(sorted(stats), ["api", "db"])
+        self.assertEqual(stats["api"]["cpu"], 12.5)
+        self.assertAlmostEqual(stats["api"]["mem"], 245.3 * 1024 ** 2)
+        self.assertEqual(stats["db"]["cpu"], 0.0)  # docker prints "--" for a starting container
+
+    def test_stack_usage_sums_running_containers(self):
+        stats = {"a": {"cpu": 10.0, "mem": 100.0, "mem_pct": 1.0},
+                 "b": {"cpu": 5.5, "mem": 50.0, "mem_pct": 0.5}}
+        mine = [{"name": "a"}, {"name": "b"}, {"name": "stopped"}]
+        usage = eva.stack_usage(mine, stats)
+        self.assertEqual((usage["cpu"], usage["mem"]), (15.5, 150.0))
+        self.assertIsNone(eva.stack_usage([{"name": "stopped"}], stats))
+
+    def test_render_ps_shows_cpu_and_ram_for_running_containers(self):
+        cts = [{"name": "api", "stack": "app", "state": "running", "status": "Up 1 hour",
+                "networks": "net", "ports": ""},
+               {"name": "old", "stack": "app", "state": "exited", "status": "Exited (0)",
+                "networks": "", "ports": ""}]
+        stats = {"api": {"cpu": 12.5, "mem": 245.3 * 1024 ** 2, "mem_pct": 3.0}}
+        out = eva.capture(lambda: eva.render_ps(cts, stats))
+        self.assertIn("12.5%", out)
+        self.assertIn("245.3 MiB", out)
+        self.assertIn("CPU", out)
+
+    def test_show_live_prints_once_without_a_terminal(self):
+        calls = []
+        out = io.StringIO()
+        with redirect_stdout(out):
+            eva.show_live(lambda: calls.append(1) or "frame\n", interval=3)
+        self.assertEqual((calls, out.getvalue()), ([1], "frame\n"))
+
+
+class DestructiveActionTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(eva, "ASSUME_YES", False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_confirm_with_yes_flag_does_not_ask(self):
+        with mock.patch.object(eva, "ASSUME_YES", True), mock.patch.object(eva, "pick") as pick:
+            self.assertTrue(eva.confirm("sure?"))
+        pick.assert_not_called()
+
+    def test_confirm_without_a_terminal_refuses(self):
+        with mock.patch.object(eva.sys, "stdin") as stdin, redirect_stdout(io.StringIO()):
+            stdin.isatty.return_value = False
+            self.assertFalse(eva.confirm("sure?"))
+
+    def test_confirm_follows_the_picker(self):
+        with mock.patch.object(eva.sys, "stdin") as stdin, \
+                mock.patch.object(eva.sys, "stdout") as stdout, \
+                mock.patch.object(eva, "pick", side_effect=[1, 0, None]):
+            stdin.isatty.return_value = stdout.isatty.return_value = True
+            self.assertTrue(eva.confirm("sure?"))
+            self.assertFalse(eva.confirm("sure?"))
+            self.assertFalse(eva.confirm("sure?"))  # Esc
+
+    def stacks(self):
+        return [Path("a/compose.yml"), Path("b/compose.yml")]
+
+    def run_compose(self, action, name, confirmed):
+        ok_run = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(eva, "find_stacks", return_value=self.stacks()), \
+                mock.patch.object(eva, "containers", return_value=[]), \
+                mock.patch.object(eva, "confirm", return_value=confirmed) as confirm, \
+                mock.patch.object(eva, "run", return_value=ok_run) as run, \
+                redirect_stdout(io.StringIO()):
+            eva.cmd_compose(action, name)
+        return confirm, run
+
+    def test_down_asks_first_and_stops_when_declined(self):
+        confirm, run = self.run_compose("down", "all", confirmed=False)
+        confirm.assert_called_once()
+        run.assert_not_called()
+
+    def test_down_all_is_flagged_as_dangerous(self):
+        confirm, _ = self.run_compose("down", "all", confirmed=True)
+        self.assertTrue(confirm.call_args[1]["danger"])
+
+    def test_down_runs_once_confirmed(self):
+        _, run = self.run_compose("down", "all", confirmed=True)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args[0][0], ["docker", "compose", "down"])
+
+    def test_up_and_restart_do_not_ask(self):
+        for action in ("up", "restart"):
+            confirm, run = self.run_compose(action, "all", confirmed=False)
+            confirm.assert_not_called()
+            self.assertEqual(run.call_count, 2)
+
+    def test_yes_flag_is_parsed_and_removed_from_the_arguments(self):
+        with redirect_stdout(io.StringIO()):
+            eva.main(["--version", "--yes"])
+        self.assertTrue(eva.ASSUME_YES)
+        with redirect_stdout(io.StringIO()):
+            eva.main(["--version"])
+        self.assertFalse(eva.ASSUME_YES)
+
+
+class CleanupTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(eva, "ASSUME_YES", False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_only_the_volumes_level_can_delete_volumes(self):
+        flat = {k: [" ".join(c) for c in cmds] for k, cmds in eva.CLEAN_COMMANDS.items()}
+        self.assertFalse(any("--volumes" in c for c in flat["safe"] + flat["all"]))
+        self.assertTrue(any("--volumes" in c for c in flat["volumes"]))
+
+    def test_safe_cleanup_never_touches_containers_or_volumes(self):
+        flat = " ".join(" ".join(c) for c in eva.CLEAN_COMMANDS["safe"])
+        self.assertNotIn("system prune", flat)
+        self.assertNotIn("volume", flat)
+
+    def test_updates_use_the_safe_level_by_default(self):
+        import inspect
+        self.assertEqual(inspect.signature(eva.docker_prune).parameters["level"].default, "safe")
+
+    def cleanup(self, level, confirmed=False):
+        preview = {"volumes": ["data_vol"], "stopped": [], "dangling": [], "unused": [], "df": ""}
+        with mock.patch.object(eva, "docker_prune") as prune, \
+                mock.patch.object(eva, "cleanup_preview", return_value=preview), \
+                mock.patch.object(eva, "confirm", return_value=confirmed) as confirm, \
+                mock.patch.object(eva.sys, "stdin") as stdin, \
+                redirect_stdout(io.StringIO()):
+            stdin.isatty.return_value = False
+            eva.cmd_cleanup(level)
+        return prune, confirm
+
+    def test_safe_cleanup_runs_without_asking(self):
+        prune, confirm = self.cleanup("safe")
+        confirm.assert_not_called()
+        prune.assert_called_once_with("safe")
+
+    def test_volume_cleanup_needs_confirmation(self):
+        prune, confirm = self.cleanup("volumes", confirmed=False)
+        confirm.assert_called_once()
+        prune.assert_not_called()
+        prune, _ = self.cleanup("volumes", confirmed=True)
+        prune.assert_called_once_with("volumes")
+
+    def test_full_cleanup_needs_confirmation(self):
+        prune, confirm = self.cleanup("all", confirmed=False)
+        confirm.assert_called_once()
+        prune.assert_not_called()
+
+    def test_preview_separates_dangling_unused_and_used_images(self):
+        def fake_run(cmd, **_):
+            if cmd[:2] == ["docker", "ps"] and "-aq" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "c1\n", "")
+            if cmd[:2] == ["docker", "inspect"]:
+                return subprocess.CompletedProcess(cmd, 0, "sha256:used\n", "")
+            if cmd[:3] == ["docker", "image", "ls"]:
+                rows = ["sha256:used\tapp:1\t100MB", "sha256:old\t<none>:<none>\t50MB",
+                        "sha256:spare\tother:2\t20MB"]
+                return subprocess.CompletedProcess(cmd, 0, "\n".join(rows), "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        with mock.patch.object(eva, "run", side_effect=fake_run):
+            preview = eva.cleanup_preview()
+        self.assertEqual(preview["dangling"], ["<none>:<none> (50MB)"])
+        self.assertEqual(preview["unused"], ["other:2 (20MB)"])
+
+
 if __name__ == "__main__":
     unittest.main()

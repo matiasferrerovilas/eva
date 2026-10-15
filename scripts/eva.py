@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """eva - homelab CLI (interactive menu + subcommands). No third-party deps."""
 
+import io
 import json
 import os
+import re
 import select
 import shutil
 import subprocess
@@ -11,6 +13,7 @@ import termios
 import time
 import tty
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 
 VERSION = "0.1.0"
@@ -20,6 +23,7 @@ ENV_FILE = CONFIG_DIR / ".env"
 ENV_KEY = "containers_location"
 ROOT = None  # set by load_config()
 CANCELLED = False  # set by pick() when the user backs out (Esc / Ctrl+C)
+ASSUME_YES = False  # --yes: skip confirmations (required when there is no terminal)
 PRUNE_DIRS = {
     ".git", "data", "letsencrypt", "uploads", "upload", "database",
     "model-cache", "cache", "logs", "tmp",
@@ -113,6 +117,32 @@ STR = {
     "logs.pick": ("📜 ¿Logs de qué contenedor?", "📜 Logs of which container?"),
     "logs.follow": ("Siguiendo logs de {name} — Ctrl+C para volver",
                     "Following logs of {name} — Ctrl+C to go back"),
+    "live.total": ("Total: CPU {cpu} · RAM {mem}", "Total: CPU {cpu} · RAM {mem}"),
+    "confirm.no": ("No, cancelar", "No, cancel"),
+    "confirm.yes": ("Sí, continuar", "Yes, continue"),
+    "confirm.needs_yes": ("Esta acción necesita confirmación. Ejecutala en una terminal interactiva o agregá --yes.",
+                          "This action needs confirmation. Run it in an interactive terminal or add --yes."),
+    "confirm.down": ("¿Bajar {n} stack(s)? Se detienen y eliminan sus contenedores (los volúmenes se conservan)",
+                     "Stop {n} stack(s)? Their containers are stopped and removed (volumes are kept)"),
+    "confirm.down_all": ("¿Bajar TODOS los stacks ({n})? Esto apaga todo el homelab, incluido el acceso externo",
+                         "Stop ALL stacks ({n})? This shuts down the whole homelab, including remote access"),
+    "clean.title": ("🧹 Limpiar Docker", "🧹 Clean up Docker"),
+    "clean.df": ("Uso actual de Docker:", "Current Docker usage:"),
+    "clean.sec.dangling": ("Imágenes viejas sin etiqueta: {n}", "Old untagged images: {n}"),
+    "clean.sec.unused": ("Imágenes sin uso: {n}", "Unused images: {n}"),
+    "clean.sec.stopped": ("Contenedores detenidos: {n}", "Stopped containers: {n}"),
+    "clean.sec.volumes": ("Volúmenes sin uso: {n}", "Unused volumes: {n}"),
+    "clean.safe": ("Segura: imágenes viejas sin etiqueta y caché de build",
+                   "Safe: old untagged images and build cache"),
+    "clean.all": ("Completa: además imágenes sin uso, contenedores detenidos y redes sin uso",
+                  "Full: also unused images, stopped containers and unused networks"),
+    "clean.volumes": ("Completa + volúmenes sin uso (puede borrar datos de stacks que estén caídos)",
+                      "Full + unused volumes (may delete the data of stacks that are down)"),
+    "clean.all_confirm": ("¿Ejecutar la limpieza completa? Elimina contenedores detenidos e imágenes sin uso",
+                          "Run the full cleanup? It removes stopped containers and unused images"),
+    "clean.volumes_confirm": ("¿Borrar {n} volumen(es) sin uso? No se puede deshacer",
+                              "Delete {n} unused volume(s)? This cannot be undone"),
+    "clean.done": ("Limpieza terminada", "Cleanup finished"),
     "logs.reconnect": ("El contenedor se reinició o cortó el stream; reconectando...",
                        "The container restarted or the stream dropped; reconnecting..."),
     "logs.stopped": ("{name} está en estado '{status}'. Fin de los logs.",
@@ -187,19 +217,19 @@ STR = {
   eva                       menú interactivo
   eva install               configurar idioma, ruta de contenedores y autocompletado
   eva containers [-a] [-w] [-i N]
-                            contenedores (redes, puertos). -a todos, -w watch
-  eva stacks                listar stacks
+                            contenedores con CPU, RAM, redes y puertos. -a todos, -w en vivo
+  eva stacks [-w] [-i N]    stacks con CPU y RAM (-w en vivo)
   eva status                temperatura, RAM, disco, salud y stacks
   eva logs [contenedor]     seguir logs
   eva check [stack|all]     ver qué stacks tienen imagen nueva (sin descargar)
   eva update [stack|all] [--force]
                             actualiza solo los que tienen novedades + prune
-  eva up|down|restart [stack|all]
+  eva up|down|restart [stack|all]   (down pide confirmación; --yes la omite)
   eva container up|restart|down [nombre]
                             start / restart / stop de un contenedor
   eva system update|upgrade|clean|docker
                             apt update+upgrade / full-upgrade / autoremove / limpiar Docker
-  eva prune                 docker system prune -a --volumes -f
+  eva prune [--all|--volumes]  limpieza de Docker: segura por defecto; --all y --volumes piden confirmación
   eva doctor                diagnóstico de requisitos (Docker, Compose, Buildx, config)
   eva update-self           actualizar eva desde git (git pull --ff-only)
   eva --version             versión de eva
@@ -210,19 +240,19 @@ STR = {
   eva                       interactive menu
   eva install               configure language, containers folder and completion
   eva containers [-a] [-w] [-i N]
-                            containers (networks, ports). -a all, -w watch
-  eva stacks                list stacks
+                            containers with CPU, RAM, networks and ports. -a all, -w live
+  eva stacks [-w] [-i N]    stacks with CPU and RAM (-w live)
   eva status                temperature, RAM, disk, health and stacks
   eva logs [container]      follow logs
   eva check [stack|all]     show which stacks have newer images (downloads nothing)
   eva update [stack|all] [--force]
                             update only stacks that have news + prune
-  eva up|down|restart [stack|all]
+  eva up|down|restart [stack|all]   (down asks for confirmation; --yes skips it)
   eva container up|restart|down [name]
                             start / restart / stop one container
   eva system update|upgrade|clean|docker
                             apt update+upgrade / full-upgrade / autoremove / Docker cleanup
-  eva prune                 docker system prune -a --volumes -f
+  eva prune [--all|--volumes]  Docker cleanup: safe by default; --all and --volumes ask for confirmation
   eva doctor                check requirements (Docker, Compose, Buildx, config)
   eva update-self           update eva from git (git pull --ff-only)
   eva --version             print eva's version
@@ -325,9 +355,12 @@ _eva() {
   fi
   case $words[2] in
     containers|ps) compadd -- -a -w -i ;;
+    stacks) compadd -- -w -i ;;
+    prune) compadd -- --all --volumes --yes ;;
     system) compadd -- update upgrade clean docker ;;
     update) compadd -- all --force ${(f)"$(eva _complete stacks 2>/dev/null)"} ;;
-    check|up|down|restart) compadd -- all ${(f)"$(eva _complete stacks 2>/dev/null)"} ;;
+    check|up|restart) compadd -- all ${(f)"$(eva _complete stacks 2>/dev/null)"} ;;
+    down) compadd -- all --yes ${(f)"$(eva _complete stacks 2>/dev/null)"} ;;
     logs) compadd -- ${(f)"$(eva _complete containers 2>/dev/null)"} ;;
     container)
       if (( CURRENT == 3 )); then compadd -- up restart down
@@ -346,9 +379,12 @@ BASH_COMPLETION = r"""_eva() {
   fi
   case "${COMP_WORDS[1]}" in
     containers|ps) COMPREPLY=( $(compgen -W "-a -w -i" -- "$cur") ) ;;
+    stacks) COMPREPLY=( $(compgen -W "-w -i" -- "$cur") ) ;;
+    prune) COMPREPLY=( $(compgen -W "--all --volumes --yes" -- "$cur") ) ;;
     system) COMPREPLY=( $(compgen -W "update upgrade clean docker" -- "$cur") ) ;;
     update) COMPREPLY=( $(compgen -W "all --force $(eva _complete stacks 2>/dev/null)" -- "$cur") ) ;;
-    check|up|down|restart) COMPREPLY=( $(compgen -W "all $(eva _complete stacks 2>/dev/null)" -- "$cur") ) ;;
+    check|up|restart) COMPREPLY=( $(compgen -W "all $(eva _complete stacks 2>/dev/null)" -- "$cur") ) ;;
+    down) COMPREPLY=( $(compgen -W "all --yes $(eva _complete stacks 2>/dev/null)" -- "$cur") ) ;;
     logs) COMPREPLY=( $(compgen -W "$(eva _complete containers 2>/dev/null)" -- "$cur") ) ;;
     container)
       if [[ $COMP_CWORD -eq 2 ]]; then COMPREPLY=( $(compgen -W "up restart down" -- "$cur") )
@@ -716,6 +752,71 @@ def wait_key(timeout=None):
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
+@contextmanager
+def cbreak_mode():
+    """cbreak + hidden cursor for a live view; restores the terminal on exit."""
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    print("\033[?25l", end="", flush=True)
+    try:
+        yield
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        print("\033[?25h", end="", flush=True)
+
+
+def poll_key(timeout):
+    """Key pressed within `timeout` seconds (terminal in cbreak mode), else None."""
+    fd = sys.stdin.fileno()
+    if select.select([fd], [], [], timeout)[0]:
+        return read_key()
+    return None
+
+
+def capture(render):
+    """Run a printing function and return what it printed."""
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        render()
+    return buf.getvalue()
+
+
+def show_live(frame, interval=None):
+    """Print frame() once, or refresh it every `interval` seconds until Esc/Enter.
+    The next frame is built before drawing, so the screen never flickers blank."""
+    if interval is None or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print(frame(), end="")
+        return
+    first = True
+    try:
+        with cbreak_mode():
+            while True:
+                started = time.time()
+                text = frame()  # docker stats takes ~2s itself, so count it as part of the interval
+                prefix = "\033[2J\033[H" if first else "\033[H"
+                print(prefix + text.replace("\n", "\033[K\n") + "\033[J", end="", flush=True)
+                first = False
+                if poll_key(max(0.2, interval - (time.time() - started))) in ("esc", "enter"):
+                    break
+    except KeyboardInterrupt:
+        pass
+    clear()
+
+
+def confirm(title, lines=(), danger=False):
+    """Ask before a destructive action. 'No' and Esc cancel; with no terminal it needs --yes."""
+    if ASSUME_YES:
+        return True
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        err(t("confirm.needs_yes"))
+        return False
+    for ln in lines:
+        print(ln)
+    shown = f"{RED}{title}{R}" if danger else title
+    return pick(shown, [t("confirm.no"), t("confirm.yes")]) == 1
+
+
 def pick_numbered(title, items, extra=None):
     """Fallback when stdin is not a TTY."""
     print(f"\n{B}{title}{R}")
@@ -747,8 +848,68 @@ def fmt_ports(ports):
     return "  ".join(dict.fromkeys(out)) or f"{D}—{R}"
 
 
-def render_ps(show_all, hint=""):
-    cts = [c for c in containers() if show_all or c["state"] == "running"]
+SIZE_UNITS = {"b": 1, "kb": 1e3, "mb": 1e6, "gb": 1e9, "tb": 1e12,
+              "kib": 1024, "mib": 1024 ** 2, "gib": 1024 ** 3, "tib": 1024 ** 4}
+
+
+def parse_size(text):
+    """'245.3MiB' -> bytes. Unknown or empty text -> 0."""
+    m = re.match(r"\s*([\d.]+)\s*([A-Za-z]+)", text or "")
+    return float(m.group(1)) * SIZE_UNITS.get(m.group(2).lower(), 1) if m else 0.0
+
+
+def human(nbytes):
+    for unit in ("B", "KiB", "MiB"):
+        if nbytes < 1024:
+            return ("%.0f %s" if unit == "B" else "%.1f %s") % (nbytes, unit)
+        nbytes /= 1024
+    return "%.2f GiB" % nbytes
+
+
+def percent(text):
+    try:
+        return float(str(text).strip().rstrip("%"))
+    except ValueError:
+        return 0.0
+
+
+def container_stats():
+    """{name: {cpu, mem, mem_pct}} for running containers (one docker sample, ~1-2s)."""
+    r = run(["docker", "stats", "--no-stream", "--format", "{{json .}}"], timeout=25)
+    out = {}
+    for ln in r.stdout.splitlines():
+        try:
+            o = json.loads(ln)
+        except ValueError:
+            continue
+        out[o.get("Name", "")] = {
+            "cpu": percent(o.get("CPUPerc")),
+            "mem": parse_size(str(o.get("MemUsage", "")).split("/")[0]),
+            "mem_pct": percent(o.get("MemPerc")),
+        }
+    return out
+
+
+def level_color(value, warn_at, crit_at):
+    return GREEN if value < warn_at else YELLOW if value < crit_at else RED
+
+
+def cpu_cell(s):
+    """CPU% as docker reports it: 100 = one full core."""
+    return f"{level_color(s['cpu'], 60, 120)}{s['cpu']:5.1f}%{R}" if s else f"{D}    —{R}"
+
+
+def mem_cell(s):
+    return f"{level_color(s['mem_pct'], 60, 85)}{human(s['mem']).rjust(9)}{R}" if s else f"{D}        —{R}"
+
+
+def totals_line(stats, names):
+    mine = [stats[n] for n in names if n in stats]
+    cpu, mem = sum(s["cpu"] for s in mine), sum(s["mem"] for s in mine)
+    return f"{B}{t('live.total', cpu='%.1f%%' % cpu, mem=human(mem))}{R}"
+
+
+def render_ps(cts, stats, hint=""):
     up = sum(1 for c in cts if c["state"] == "running")
     banner(t("ps.title"), f"{up}/{len(cts)} running{hint}")
     if not cts:
@@ -756,36 +917,99 @@ def render_ps(show_all, hint=""):
         return
     nw = max(len(c["name"]) for c in cts)
     sw = max(len(c["stack"]) for c in cts)
-    head = f"{t('col.container').ljust(nw)}  {'STACK'.ljust(sw)}  {t('col.state').ljust(26)}  {t('col.netports')}"
+    head = (f"{t('col.container').ljust(nw)}  {'STACK'.ljust(sw)}  {t('col.state').ljust(22)}  "
+            f"{'CPU'.rjust(6)}  {'RAM'.rjust(9)}  {t('col.netports')}")
     print(f"   {B}{head}{R}")
     print(line())
     for c in cts:
         nets = ",".join(n for n in c["networks"].split(",") if n) or "—"
+        s = stats.get(c["name"])
         print(f" {dot(c)} {c['name'].ljust(nw)}  {D}{c['stack'].ljust(sw)}{R}  "
-              f"{c['status'][:26].ljust(26)}  {BLUE}{nets}{R}  {fmt_ports(c['ports'])}")
+              f"{c['status'][:22].ljust(22)}  {cpu_cell(s)}  {mem_cell(s)}  "
+              f"{BLUE}{nets}{R}  {fmt_ports(c['ports'])}")
     print(line())
+    print(totals_line(stats, [c["name"] for c in cts]))
 
 
 def cmd_ps(show_all=False, watch=False, interval=3):
-    if not watch:
-        return render_ps(show_all)
-    try:
-        while True:
-            print("\033[2J\033[H", end="")
-            render_ps(show_all, f" · ↻ {interval}s")
-            print(f"{D}{t('esc_back')}{R}", flush=True)
-            if wait_key(interval):
-                break
-    except KeyboardInterrupt:
-        pass
-    clear()
+    hint = f" · ↻ {interval}s" if watch else ""
+
+    def frame():
+        cts = [c for c in containers() if show_all or c["state"] == "running"]
+        text = capture(lambda: render_ps(cts, container_stats(), hint))
+        return text + (f"{D}{t('esc_back')}{R}\n" if watch else "")
+    show_live(frame, interval if watch else None)
 
 
-def docker_prune():
-    print(f"\n{D}🧹 docker system prune -a --volumes -f{R}")
-    r = run(["docker", "system", "prune", "-a", "--volumes", "-f"])
-    tail = (r.stdout.strip().splitlines() or [""])[-1]
-    ok(tail) if r.returncode == 0 else err(r.stderr.strip())
+CLEAN_COMMANDS = {
+    # safe: only what an update leaves behind. all: anything unused. volumes: also unused volumes.
+    "safe": [["docker", "image", "prune", "-f"], ["docker", "builder", "prune", "-f"]],
+    "all": [["docker", "system", "prune", "-a", "-f"]],
+    "volumes": [["docker", "system", "prune", "-a", "--volumes", "-f"]],
+}
+
+
+def docker_prune(level="safe"):
+    for cmd in CLEAN_COMMANDS[level]:
+        print(f"\n{D}🧹 {' '.join(cmd)}{R}")
+        r = run(cmd)
+        tail = (r.stdout.strip().splitlines() or [""])[-1]
+        ok(tail) if r.returncode == 0 else err(r.stderr.strip())
+
+
+def cleanup_preview():
+    """What each cleanup level would remove. Read-only."""
+    stopped = run(["docker", "ps", "-a", "--filter", "status=exited", "--filter", "status=created",
+                   "--format", "{{.Names}}"]).stdout.split()
+    volumes = run(["docker", "volume", "ls", "-q", "-f", "dangling=true"]).stdout.split()
+    ids = run(["docker", "ps", "-aq"]).stdout.split()
+    used = set(run(["docker", "inspect", "--format", "{{.Image}}"] + ids).stdout.split()) if ids else set()
+    dangling, unused = [], []
+    listing = run(["docker", "image", "ls", "-a", "--no-trunc",
+                   "--format", "{{.ID}}\t{{.Repository}}:{{.Tag}}\t{{.Size}}"]).stdout
+    for ln in listing.splitlines():
+        parts = ln.split("\t")
+        if len(parts) != 3 or parts[0] in used:
+            continue
+        (dangling if parts[1] == "<none>:<none>" else unused).append("%s (%s)" % (parts[1], parts[2]))
+    return {"stopped": stopped, "volumes": volumes, "dangling": dangling, "unused": unused,
+            "df": run(["docker", "system", "df"]).stdout.rstrip()}
+
+
+def print_preview(p):
+    print(f"\n{B}{t('clean.df')}{R}\n{D}{p['df']}{R}")
+    for key, names, col in (("dangling", p["dangling"], YELLOW), ("unused", p["unused"], YELLOW),
+                            ("stopped", p["stopped"], YELLOW), ("volumes", p["volumes"], RED)):
+        print(f"\n{col}•{R} {t('clean.sec.' + key, n=len(names))}")
+        for name in names[:8]:
+            print(f"    {D}{name}{R}")
+        if len(names) > 8:
+            print(f"    {D}{t('dash.more', n=len(names) - 8)}{R}")
+
+
+def cmd_cleanup(level=None):
+    """Interactive cleanup: preview, then choose how far to go. Flags (--all, --volumes) skip the
+    menu but still ask for confirmation. The default level is the safe one."""
+    interactive = level is None and sys.stdin.isatty() and sys.stdout.isatty()
+    level = level or "safe"
+    banner(t("clean.title"), "docker")
+    if interactive or level != "safe":
+        preview = cleanup_preview()
+        if interactive:
+            print_preview(preview)
+            keys = ["safe", "all", "volumes"]
+            sel = pick(t("clean.title"), [t("clean." + k) for k in keys])
+            if sel is None:
+                return
+            level = keys[sel]
+    if level == "all" and not confirm(t("clean.all_confirm"), []):
+        return
+    if level == "volumes" and not confirm(
+            t("clean.volumes_confirm", n=len(preview["volumes"])),
+            [f"  {RED}{v}{R}" for v in preview["volumes"][:15]], danger=True):
+        return
+    docker_prune(level)
+    ok(t("clean.done"))
 
 
 def cmd_system(action=None):
@@ -809,7 +1033,7 @@ def cmd_system(action=None):
         err(t("sys.invalid", a=action, opts=", ".join(cmds)))
         return
     if action == "docker":
-        return docker_prune()
+        return cmd_cleanup()
     if action == "eva":
         return cmd_update_self()
     print(f"\n{B}{cmds[action][0]}{R}")
@@ -819,11 +1043,20 @@ def cmd_system(action=None):
         pass
 
 
-def cmd_stacks():
-    stacks = find_stacks()
-    banner("📦 Stacks", f"{len(stacks)} compose")
-    cts = containers()
+def stack_usage(mine, stats):
+    """Summed CPU/RAM of a stack's running containers, or None if none is running."""
+    used = [stats[c["name"]] for c in mine if c["name"] in stats]
+    if not used:
+        return None
+    return {"cpu": sum(s["cpu"] for s in used), "mem": sum(s["mem"] for s in used),
+            "mem_pct": sum(s["mem_pct"] for s in used)}
+
+
+def render_stacks(stacks, cts, stats, hint=""):
+    banner("📦 Stacks", f"{len(stacks)} compose{hint}")
     nw = max((len(s.parent.name) for s in stacks), default=5)
+    print(f"   {B}{'STACK'.ljust(nw)}  {'     '}  {'CPU'.rjust(6)}  {'RAM'.rjust(9)}  PATH{R}")
+    print(line())
     for s in stacks:
         name = s.parent.name
         mine = [c for c in cts if c["stack"] == name]
@@ -833,7 +1066,20 @@ def cmd_stacks():
         else:
             col = YELLOW if run_n else RED
         rel = s.parent.relative_to(ROOT)
-        print(f" {col}●{R} {name.ljust(nw)}  {run_n}/{len(mine)}  {D}{rel}{R}")
+        usage = stack_usage(mine, stats)
+        print(f" {col}●{R} {name.ljust(nw)}  {f'{run_n}/{len(mine)}'.ljust(5)}  "
+              f"{cpu_cell(usage)}  {mem_cell(usage)}  {D}{rel}{R}")
+    print(line())
+    print(totals_line(stats, [c["name"] for c in cts]))
+
+
+def cmd_stacks(watch=False, interval=3):
+    hint = f" · ↻ {interval}s" if watch else ""
+
+    def frame():
+        text = capture(lambda: render_stacks(find_stacks(), containers(), container_stats(), hint))
+        return text + (f"{D}{t('esc_back')}{R}\n" if watch else "")
+    show_live(frame, interval if watch else None)
 
 
 def cmd_logs(name=None):
@@ -1074,6 +1320,14 @@ def cmd_compose(action, name=None):
             err(t("notfound", name=name))
             return
         targets = [s]
+    if action == "down":
+        every = len(targets) == len(stacks) and len(targets) > 1
+        cts = containers()
+        lines = [f"  {tg.parent.name}  {D}({sum(1 for c in cts if c['stack'] == tg.parent.name)} "
+                 f"containers){R}" for tg in targets]
+        title = t("confirm.down_all" if every else "confirm.down", n=len(targets))
+        if not confirm(title, lines, danger=every):
+            return
     args = {"up": ["up", "-d"], "down": ["down"], "restart": ["restart"]}[action]
     for tg in targets:
         r = run(["docker", "compose", *args], cwd=str(tg.parent))
@@ -1165,9 +1419,17 @@ def cmd_stack_action():
         cmd_compose(["up", "restart", "down"][act])
 
 
+def live_ps():
+    cmd_ps(show_all=True, watch=True)
+
+
+def live_stacks():
+    cmd_stacks(watch=True)
+
+
 CONTAINERS_MENU = [
-    ("menu.ps", lambda: cmd_ps(show_all=True)),
-    ("menu.stacks", cmd_stacks),
+    ("menu.ps", live_ps),
+    ("menu.stacks", live_stacks),
     ("menu.logs", cmd_logs),
     ("menu.ctaction", cmd_container),
     ("menu.stackaction", cmd_stack_action),
@@ -1183,7 +1445,7 @@ def containers_menu():
             return
         label, fn = CONTAINERS_MENU[sel]
         fn()
-        if not CANCELLED and fn is not cmd_logs:  # logs end with Ctrl+C
+        if not CANCELLED and fn not in (cmd_logs, live_ps, live_stacks):  # these end on their own key
             pause()
 
 
@@ -1227,6 +1489,9 @@ def usage():
 
 
 def main(argv):
+    global ASSUME_YES
+    ASSUME_YES = any(a in ("--yes", "-y") for a in argv)
+    argv = [a for a in argv if a not in ("--yes", "-y")]
     if argv and argv[0] in ("-h", "--help", "help"):
         load_language()
         print(usage())
@@ -1278,11 +1543,12 @@ def main(argv):
         "ps": lambda: cmd_ps("-a" in flags, "-w" in flags, interval),
         "system": lambda: cmd_system(arg),
         "upgrade": lambda: cmd_system("upgrade"), "clean": lambda: cmd_system("clean"),
-        "stacks": cmd_stacks, "status": cmd_status,
+        "stacks": lambda: cmd_stacks("-w" in flags, interval), "status": cmd_status,
         "check": lambda: cmd_check(arg),
         "logs": lambda: cmd_logs(arg),
         "update": lambda: cmd_update(arg if arg != "--force" else None, "--force" in flags),
-        "prune": docker_prune, "docker-prune": docker_prune,
+        "prune": lambda: cmd_cleanup("volumes" if "--volumes" in flags else "all" if "--all" in flags else "safe"),
+        "docker-prune": lambda: cmd_cleanup("volumes" if "--volumes" in flags else "all" if "--all" in flags else "safe"),
         "container": lambda: cmd_container(arg, rest[1] if len(rest) > 1 else None),
         "up": lambda: cmd_compose("up", arg),
         "down": lambda: cmd_compose("down", arg),

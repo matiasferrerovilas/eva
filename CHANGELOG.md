@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- CPU y RAM por contenedor y por stack, en vivo desde el menú (`Esc` vuelve) y con `-w` en
+  `eva containers` y `eva stacks`. La vista se redibuja sin parpadeo.
+- Confirmación para `down` (más fuerte al bajar todos los stacks) y `--yes` para omitirla; sin
+  terminal y sin `--yes` la acción se niega.
+- Limpieza de Docker con vista previa de lo que se borraría y tres niveles: segura, completa y
+  completa con volúmenes. `eva prune` acepta `--all` y `--volumes`.
+
+### Changed
+- La limpieza que corre después de un update ya no ejecuta `docker system prune -a --volumes`: solo
+  borra las imágenes viejas sin etiqueta. Antes podía eliminar volúmenes de stacks caídos.
+- `eva prune` es ahora la limpieza segura por defecto.
+
 ## [0.1.0] - 2026-10-15
 
 ### Added
