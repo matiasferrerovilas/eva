@@ -193,6 +193,7 @@ Tus stacks van **fuera** de este repo, por ejemplo en `/srv/stacks`: suelen tene
 - Los issues y pull requests son bienvenidos.
 - Commits con [Conventional Commits](https://www.conventionalcommits.org/es/v1.0.0/) (`feat:`, `fix:`, `docs:`...).
 - Cada cambio se anota en el [CHANGELOG](CHANGELOG.md).
+- Para publicar una versión: subí `VERSION` en `scripts/eva.py` y agregá su sección `## [x.y.z]` al CHANGELOG. Al llegar a `main`, el CI crea el tag y el release de GitHub con esas notas.
 - Los tests no necesitan Docker: `python3 -m unittest discover -s tests`. El CI los corre en Python 3.8 a 3.13 y pasa `ruff`.
 - Para agregar un idioma, sumá una columna a la tabla `STR` de `scripts/eva.py` y su código a `LANGS`.
 - En la lista de ideas: backup de volúmenes, notificaciones, update programado con rollback y shell dentro de un contenedor.

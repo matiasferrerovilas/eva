@@ -49,3 +49,54 @@ jobs:
           python scripts/eva.py --help
           python scripts/eva.py completion bash | bash -n
           python scripts/eva.py completion zsh | zsh -n
+
+  # Creates the git tag and the GitHub release when scripts/eva.py bumps VERSION.
+  # Does nothing when the tag already exists, so ordinary commits stay green.
+  release:
+    name: Release
+    needs: [lint, test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Read the version
+        id: version
+        run: |
+          version=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' scripts/eva.py)
+          [ -n "$version" ] || { echo "VERSION not found in scripts/eva.py" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Check whether the tag already exists
+        id: tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/v$VERSION" > /dev/null; then
+            echo "Tag v$VERSION already exists, nothing to release."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Extract the release notes from CHANGELOG.md
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '
+            index($0, "## [" v "]") == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "CHANGELOG.md has no entry for $VERSION. Add a '## [$VERSION]' section before releasing." >&2
+            exit 1
+          fi
+      - name: Create the tag and the GitHub release
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: gh release create "v$VERSION" --target "$GITHUB_SHA" --title "eva $VERSION" --notes-file notes.md

@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   la sintaxis de los scripts de autocompletado (bash y zsh).
 - Tests unitarios (`tests/test_eva.py`, solo biblioteca estándar, sin Docker): traducciones,
   configuración, detección de stacks y exclusiones, autocompletado y comparación de digests.
+- Release automático: cuando `VERSION` sube en `scripts/eva.py`, el CI crea el tag `vX.Y.Z` y el
+  release de GitHub con las notas de su sección del CHANGELOG (falla si esa sección no existe).
 
 ### Fixed
 - Ver logs: ya no vuelve al menú a los pocos segundos con un contenedor que se reinicia. `docker
