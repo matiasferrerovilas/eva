@@ -1,158 +1,200 @@
+<div align="center">
+
 # eva
 
-A small, dependency-free terminal CLI to run a Docker Compose homelab from one place: see what is running, follow logs, check which images have updates, and update stacks with an arrow-key menu.
+**La consola de tu homelab: contenedores, logs y actualizaciones desde un menú.**
+Mirá qué está corriendo, seguí logs, enterate de qué imágenes tienen novedades y actualizá tus stacks de Docker Compose con las flechas del teclado.
 
-It works on any Linux host with Docker, from a Raspberry Pi to a server. eva only manages the stacks you point it to: your own compose files live in a separate folder, outside this repository.
+![Python](https://img.shields.io/badge/Python-3.8%2B-3776ab?logo=python&logoColor=white)
+![Docker Compose](https://img.shields.io/badge/Docker%20Compose-2496ed?logo=docker&logoColor=white)
+![Linux](https://img.shields.io/badge/Linux-host-fcc624?logo=linux&logoColor=black)
+![Dependencias](https://img.shields.io/badge/dependencias-0-4d4d4d)
 
-```
-╭──────────────────────────────────────────────────────────────╮
-│ 🏠 EVA                                                homelab │
-╰──────────────────────────────────────────────────────────────╯
+<img src="docs/architecture.svg" alt="Arquitectura de eva: terminal, eva, Docker, registry, stacks, config/.env y sistema, dentro de un host Linux" width="900" />
 
- Temp  ██████████░░░░░░  62.0°C
- RAM   ████████░░░░░░░░  3.8 / 7.9 GB
- Disco █████░░░░░░░░░░░  18 / 62 GB
- CPU   █░░░░░░░░░░░░░░░  load 0.27 · 4 cores · up 2d 3h
+</div>
 
- ● 19/19 contenedores running
+---
 
-¿Qué querés hacer?  ↑↓ mover · Enter/Espacio elegir · q volver
- ❯ Contenedores
-   Update (ver novedades, pull, recrear, prune)
-   Sistema (apt, limpiar Docker)
-   Configuración (idioma, ruta de contenedores)
-   Salir
-```
+## Qué hace
 
-The **Containers** entry opens a submenu: list containers, list stacks, view logs, up/restart/down of a single container, and up/restart/down of a whole stack.
+| Área | Para qué sirve |
+| --- | --- |
+| **Estado de un vistazo** | Temperatura, RAM, disco, carga y cuántos contenedores están sanos, con barras que cambian de color. |
+| **Contenedores y stacks** | Listá contenedores con su estado, redes y puertos (con modo watch) y los stacks con su salud. |
+| **Logs** | Elegí un contenedor de la lista y seguí sus logs en vivo. |
+| **Update con vista previa** | Compara el digest de cada imagen contra el registry **sin descargar nada**, te muestra qué stacks tienen novedades y recién ahí hace `pull` y recrea. |
+| **Up / restart / down** | Sobre un solo contenedor, sobre un stack o sobre todos. |
+| **Sistema** | `apt update/upgrade`, limpieza de paquetes y limpieza de Docker, desde el mismo menú. |
+| **Comodidades** | Navegación con flechas (`Esc` vuelve un nivel), autocompletado de zsh/bash, español e inglés, y `eva update-self` para actualizarse solo. |
 
-> The interface is available in **Spanish** and **English**. You pick one during setup (shown above in Spanish).
+eva solo administra los stacks que le indiques: tus `compose.yml` viven en una carpeta aparte, fuera de este repositorio.
 
-## Features
+---
 
-- **Dashboard**: CPU temperature, RAM, disk, load, and container health at a glance.
-- **Containers and stacks**: list them with state, networks, and published ports. Watch mode included.
-- **Logs**: pick a container from a list and follow its logs live.
-- **Update with preview**: compares local image digests against the registry (no download) and shows which stacks have a new version. Then pull, recreate, and prune.
-- **Up / down / restart** for a single container, or for one stack or all of them.
-- **System**: `apt update/upgrade`, `full-upgrade`, `autoremove`, and Docker cleanup.
-- **Arrow-key navigation** everywhere. `Esc` goes back, and the screen is cleared on every step.
-- **Shell completion** for zsh (or bash if zsh is not installed), including stack and container names.
-- **Self-update**: the menu header shows the version, and tells you when a newer one is available (checked at most every 6 hours). Update from **System → Update eva**.
-- **Two languages**: Spanish and English, chosen at setup.
-- **No dependencies**: Python standard library only.
+## Tutorial: instalarlo en tu máquina
 
-## Requirements
+### Requisitos
 
-- Linux, Python 3.8+ (uses `termios`, so Windows is not supported)
-- Docker with the Compose plugin (`docker compose`)
-- Docker Buildx (`docker buildx`), used to read remote image digests for update checks
-- `sudo`, only for the `apt` actions (and for installing the command in `/usr/local/bin`, which is optional)
-- Optional: `vcgencmd` (Raspberry Pi) for temperature. Falls back to `/sys/class/thermal`.
+- **Linux** y **Python 3.8+** (usa `termios`, así que Windows no está soportado).
+- **Docker** con el plugin Compose (`docker compose`).
+- **Docker Buildx**, para comparar imágenes contra el registry. Si falta, todo funciona menos la vista previa del update.
+- `sudo`, solo para las acciones de `apt` (y para instalar el comando en `/usr/local/bin`, que es opcional).
+- Opcional: `vcgencmd` (Raspberry Pi) para la temperatura; si no está, usa `/sys/class/thermal`.
 
-eva checks these requirements every time it starts and tells you what to fix. For example, if your user is not in the `docker` group it prints the exact `usermod` command, and if the Docker daemon is down it suggests how to start it. A missing Buildx is only a warning: everything works except the update preview. Run `eva doctor` at any time for a full report.
+eva revisa estos requisitos cada vez que arranca y te dice qué arreglar. Por ejemplo, si tu usuario no está en el grupo `docker`, imprime el `usermod` exacto.
 
-## Install
+### Pasos
 
 ```bash
-git clone <this-repo-url> ~/eva
-~/eva/scripts/eva.py install
+# 1. Clonar
+git clone <url-de-este-repo> ~/eva
+cd ~/eva
+
+# 2. Configurar (idioma, carpeta de stacks, comando y autocompletado)
+./scripts/eva.py install
 ```
 
-`eva install` will:
+`eva install` te pregunta, en orden:
 
-1. Ask for the interface language (`es` or `en`).
-2. Ask where your stacks live (the folder that contains your compose files).
-3. Ask which stacks to exclude from bulk updates (optional).
-4. Save everything to `config/.env`.
-5. Offer to link the command as `eva`: in `~/.local/bin` (default, no sudo) or in `/usr/local/bin` (needs sudo). If `~/.local/bin` is not in your `PATH`, it prints the line to add.
-6. Offer to enable shell completion: it adds one `source <(eva completion ...)` line to `~/.zshrc` if zsh is installed, otherwise to `~/.bashrc`.
+1. El idioma de la interfaz (`es` o `en`).
+2. La carpeta donde están tus stacks, la que contiene tus `compose.yml`.
+3. Qué stacks excluir de los updates masivos (opcional).
+4. Dónde instalar el comando `eva`: `~/.local/bin` (por defecto, sin sudo) o `/usr/local/bin` (con sudo).
+5. Si querés activar el autocompletado: agrega una línea a tu `~/.zshrc` si tenés zsh, o a `~/.bashrc` si no.
 
-If you run `eva` before configuring it, the installer opens by itself.
+Todo queda guardado en `config/.env`. Si ejecutás `eva` sin configurar, el instalador se abre solo.
 
-## Layout
+### Probalo
 
-```
-~/eva/                   this repository
-├── scripts/eva.py       the CLI
-└── config/
-    ├── .env             your settings (git-ignored)
-    └── .env.example     reference
-
-/srv/stacks/             your stacks: anywhere you like, set during `eva install`
-├── blog/compose.yml
-└── infra/
-    └── proxy/compose.yml
+```bash
+eva doctor    # verifica Docker, Compose, Buildx y tu configuración
+eva status    # estado de la máquina y de tus stacks
+eva           # el menú interactivo
 ```
 
-Keep your stacks out of this repository: they usually contain secrets and data. (`services/` is git-ignored here as a safety net.)
-
-Stacks are found recursively under `containers_location`. The stack name is the name of the folder that holds the compose file. The files `compose.yaml`, `compose.yml`, `docker-compose.yaml` and `docker-compose.yml` are recognized.
-Folders named `data`, `cache`, `logs`, `tmp`, `uploads`, `database`, `letsencrypt`, `model-cache` and `.git` are skipped.
-
-## Configuration
+### Configuración
 
 `config/.env`:
 
-| Key | Description |
-|---|---|
-| `containers_location` | Folder that holds your stacks. Required. |
-| `language` | Interface language: `es` or `en`. Default `es`. |
-| `excluded_stacks` | Comma-separated stack names to leave out of bulk actions (`update all`, `check all`). You can still update them by name. |
-
-Example:
+| Clave | Descripción |
+| --- | --- |
+| `containers_location` | Carpeta que contiene tus stacks. Obligatoria. |
+| `language` | Idioma de la interfaz: `es` o `en`. Por defecto `es`. |
+| `excluded_stacks` | Nombres de stacks, separados por coma, que quedan fuera de las acciones masivas (`update all`, `check all`). Igual podés actualizarlos por nombre. |
 
 ```
 containers_location=/srv/stacks
-language=en
+language=es
 excluded_stacks=db,proxy
 ```
 
-Excluding is useful for stacks pinned to `:latest` where a major upgrade could break your data, like a database.
+Excluir sirve para stacks fijados a `:latest` donde un salto de versión mayor podría romper tus datos, como una base de datos.
 
-## Usage
+---
 
-Run `eva` for the menu, or use commands directly:
+## Tutorial: usarlo
 
-| Command | What it does |
-|---|---|
-| `eva` | Interactive menu |
-| `eva status` | Dashboard and stack list |
-| `eva containers [-a] [-w] [-i N]` | Containers with networks and ports. `-a` all, `-w` watch, `-i` interval |
-| `eva stacks` | List stacks |
-| `eva logs [container]` | Follow logs |
-| `eva check [stack\|all]` | Show which stacks have newer images (downloads nothing) |
-| `eva update [stack\|all] [--force]` | Update stacks that have news, then prune. `--force` updates all selected |
-| `eva up\|down\|restart [stack\|all]` | Compose actions on a whole stack. `down` removes the stack's containers (volumes are kept) |
-| `eva container up\|restart\|down [name]` | One container: `docker start` / `restart` / `stop` |
-| `eva system update\|upgrade\|clean\|docker` | apt update+upgrade, full-upgrade, autoremove, Docker cleanup |
-| `eva doctor` | Check requirements (Python, Docker, Compose, Buildx) and config |
-| `eva install` | Configure or reconfigure (language, folder, exclusions, completion) |
-| `eva completion [zsh\|bash]` | Print the completion script |
-| `eva --version` | Print the version (and git commit) |
-| `eva update-self` | Update eva itself with `git pull --ff-only` (needs a git clone with an upstream) |
+Abrí `eva` y movete con las flechas. `Enter` o `Espacio` elige, `Esc` vuelve un nivel y, en el menú principal, sale.
 
-Keys in the menu: `↑` `↓` (or `j` `k`) to move, `Enter` or `Space` to choose, `Esc` or `q` to go back.
+```
+EVA
+├── Contenedores
+│   ├── Listar contenedores
+│   ├── Listar stacks
+│   ├── Ver logs
+│   ├── Up / Restart / Down de un contenedor
+│   └── Up / Restart / Down de un stack
+├── Update
+├── Sistema
+├── Configuración
+└── Salir
+```
 
-## How update works
+También funciona sin menú, ideal para scripts:
 
-1. For each image in the selected stacks, eva reads the digest in the registry (`docker buildx imagetools inspect`) and compares it with the local one.
-2. It shows what is new, up to date, not pulled yet, or unknown.
-3. For the stacks you confirm: `docker compose pull`, then `docker compose up -d --remove-orphans` (only containers whose image changed are recreated).
-4. It finishes with a Docker prune.
+```bash
+# Contenedores con redes y puertos, refrescando cada 5 segundos
+eva containers -w -i 5
 
-## Heads up
+# Logs de un contenedor
+eva logs mi-contenedor
 
-- The Docker cleanup runs `docker system prune -a --volumes -f`. It removes **unused volumes**, including those of stacks that are down at that moment. Back up first if you care about that data.
-- Updating `:latest` images can jump major versions. Pin versions or use `excluded_stacks` for databases.
-- `Esc` does not interrupt live logs or text prompts. Use `Ctrl+C` there.
+# ¿Qué stacks tienen imágenes nuevas? (no descarga nada)
+eva check all
 
-## Contributing
+# Actualizar un stack, o todos los que tengan novedades
+eva update mi-stack
+eva update all
+```
 
-Issues and pull requests are welcome. Ideas on the list: volume backups, notifications, a scheduled update with rollback, and shell access into a container.
+---
 
-To add a language, add a column to the `STR` table in `scripts/eva.py` and its code to `LANGS`.
+## Comandos útiles
 
-## License
+| Comando | Qué hace |
+| --- | --- |
+| `eva` | Abre el menú interactivo. |
+| `eva status` | Temperatura, RAM, disco, salud y lista de stacks. |
+| `eva containers [-a] [-w] [-i N]` | Contenedores con redes y puertos. `-a` todos, `-w` watch, `-i` intervalo. |
+| `eva stacks` | Lista los stacks. |
+| `eva logs [contenedor]` | Sigue los logs de un contenedor. |
+| `eva check [stack\|all]` | Muestra qué stacks tienen una imagen más nueva, sin descargar. |
+| `eva update [stack\|all] [--force]` | Actualiza los stacks con novedades y limpia Docker. `--force` actualiza todos los elegidos. |
+| `eva up\|down\|restart [stack\|all]` | Acciones de Compose sobre un stack. `down` elimina sus contenedores (los volúmenes se conservan). |
+| `eva container up\|restart\|down [nombre]` | Un solo contenedor: `docker start`, `restart` o `stop`. |
+| `eva system update\|upgrade\|clean\|docker` | `apt update`+`upgrade`, `full-upgrade`, `autoremove` o limpieza de Docker. |
+| `eva doctor` | Diagnóstico de requisitos y configuración. |
+| `eva install` | Configura o reconfigura eva. |
+| `eva update-self` | Se actualiza con `git pull --ff-only` (necesita un clon de git con upstream). |
+| `eva completion [zsh\|bash]` | Imprime el script de autocompletado. |
+| `eva --version` | Muestra la versión y el commit. |
 
-[MIT](LICENSE)
+---
+
+## Cómo está armado
+
+El diagrama de arriba resume el flujo: eva lee `config/.env`, llama a `docker` y `docker compose` sobre las carpetas de tus stacks, consulta el registry con `buildx` para saber si hay imágenes nuevas, y usa `apt` y `/proc` para la parte de sistema.
+
+- **Stack:** un solo archivo, `scripts/eva.py`, con la biblioteca estándar de Python. Sin dependencias.
+- **Detección de stacks:** busca recursivamente bajo `containers_location` los archivos `compose.yaml`, `compose.yml`, `docker-compose.yaml` y `docker-compose.yml`. El nombre del stack es el de la carpeta que contiene el archivo. Se saltea `data`, `cache`, `logs`, `tmp`, `uploads`, `database`, `letsencrypt`, `model-cache` y `.git`.
+- **Textos:** una tabla `STR` con cada mensaje en español e inglés.
+
+```
+eva/
+├── scripts/eva.py      # el CLI
+├── config/
+│   ├── .env            # tu configuración (ignorada por git)
+│   └── .env.example    # referencia
+├── docs/               # diagrama de arquitectura
+├── CHANGELOG.md
+└── LICENSE
+```
+
+Tus stacks van **fuera** de este repo, por ejemplo en `/srv/stacks`: suelen tener secretos y datos. Como red de seguridad, `services/` y `stacks/` están en el `.gitignore`.
+
+### Cómo funciona el update
+
+1. Por cada imagen de los stacks elegidos, eva lee el digest en el registry (`docker buildx imagetools inspect`) y lo compara con el local.
+2. Te muestra qué está nuevo, al día, sin descargar o sin información.
+3. Para los stacks que confirmes: `docker compose pull` y `docker compose up -d --remove-orphans` (solo se recrean los contenedores cuya imagen cambió).
+4. Termina con una limpieza de Docker.
+
+## Ojo con
+
+- La limpieza de Docker ejecuta `docker system prune -a --volumes -f`: elimina **volúmenes sin uso**, incluidos los de los stacks que estén caídos en ese momento. Hacé backup antes si te importan esos datos.
+- Actualizar imágenes `:latest` puede saltar de versión mayor. Fijá versiones o usá `excluded_stacks` para las bases de datos.
+- `Esc` no interrumpe los logs en vivo ni los prompts de texto: ahí usá `Ctrl+C`.
+- Si movés la carpeta de un stack, recrealo desde la ruta nueva (`docker compose up -d --force-recreate`): los contenedores existentes siguen apuntando a la ruta vieja.
+
+## Contribuir
+
+- Los issues y pull requests son bienvenidos.
+- Commits con [Conventional Commits](https://www.conventionalcommits.org/es/v1.0.0/) (`feat:`, `fix:`, `docs:`...).
+- Cada cambio se anota en el [CHANGELOG](CHANGELOG.md).
+- Para agregar un idioma, sumá una columna a la tabla `STR` de `scripts/eva.py` y su código a `LANGS`.
+- En la lista de ideas: backup de volúmenes, notificaciones, update programado con rollback y shell dentro de un contenedor.
+
+## Licencia
+
+MIT — ver [LICENSE](LICENSE).
